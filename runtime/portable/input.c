@@ -303,10 +303,22 @@ static void vpad_get(XPad* x)
     unlock();
 }
 
+static SDL_AtomicU32 g_prefer; /* input_prefer_pad */
+
+void input_prefer_pad(uint32_t id) { SDL_SetAtomicU32(&g_prefer, id); }
+
 static SDL_Gamepad* pad(int index)
 {
     int n = 0;
     SDL_JoystickID* ids = SDL_GetGamepads(&n);
+    uint32_t first = SDL_GetAtomicU32(&g_prefer);
+    for (int i = 1; first && ids && i < n; ++i) /* the preferred one first, the rest in order */
+        if (ids[i] == first)
+        {
+            memmove(ids + 1, ids, sizeof *ids * (size_t)i);
+            ids[0] = first;
+            break;
+        }
     SDL_Gamepad* p = ids && index >= 0 && index < n ? SDL_GetGamepadFromID(ids[index]) : NULL;
     SDL_free(ids);
     return p;

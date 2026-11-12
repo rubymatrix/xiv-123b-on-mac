@@ -421,6 +421,10 @@ __attribute__((constructor)) static void cover_register(void)
 
 static void* g_sdl_window;
 
+#if TARGET_OS_IPHONE
+static void touch_init(void); /* gfx9_touch.h */
+#endif
+
 static int layer_synced(void)
 {
 #if TARGET_OS_IPHONE
@@ -484,6 +488,9 @@ int g9_init(void* sdl_window, int vsync)
             g_text_pipe = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
         }
         rt_log("[gfx9] Metal on %s\n", g_dev.name.UTF8String);
+#if TARGET_OS_IPHONE
+        touch_init();
+#endif
         return g_present_pipe != nil;
     }
 }
@@ -1503,6 +1510,9 @@ static uint32_t g_draw_errors;
 #include "gfx9_upscale_none.h" /* the iOS simulator: no MetalFX */
 #endif
 #include "gfx9_navdraw.h"
+#if TARGET_OS_IPHONE
+#include "gfx9_touch.h" /* tests/ios_touch.c's controls */
+#endif
 
 /* --- one-frame draw trace (XIV_GFXTRACE=<dir>; touch <dir>/req to trace the next frame) ---------
  * <dir>/draws.txt: a line per draw (shaders, targets, blend, samplers); <dir>/consts.bin: per draw
@@ -2370,6 +2380,12 @@ void g9_present(G9Tex* bb)
                 [e setFragmentBytes:info length:16 atIndex:1];
                 [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
             }
+#if TARGET_OS_IPHONE
+            {
+                CGFloat pw = g_layer.bounds.size.width;
+                draw_touch(e, drawable.texture.width, drawable.texture.height, pw > 0 ? (float)(dw / pw) : 1.0f);
+            }
+#endif
             [e endEncoding];
 #if PRESENT_TIMES
             if (g_pace && g_refresh > 0)

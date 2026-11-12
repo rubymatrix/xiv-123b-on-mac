@@ -19,6 +19,28 @@
 #include <SDL3/SDL_main.h>
 
 int xivboot_main(int argc, char** argv);
+extern void (*xivboot_main_hook)(void); /* xivboot.c */
+void ios_touch_init(void);              /* ios_touch.c */
+void ios_touch_frame(int in_game);
+
+/* the touch controls: set up on the main loop's first turn (SDL is up then), laid out and drawn at
+ * about 60 Hz (XIV_TOUCH=0: none) */
+static void touch_tick(void)
+{
+    static int up;
+    static Uint64 last;
+    if (!up)
+    {
+        up = 1;
+        ios_touch_init();
+    }
+    Uint64 now = SDL_GetTicks();
+    if (now - last >= 16)
+    {
+        last = now;
+        ios_touch_frame(1);
+    }
+}
 
 #define MAX_ARGS 32
 
@@ -118,6 +140,15 @@ int main(int argc, char** argv)
     setenv("XIV_DOCUMENTS", docs, 0);
     setenv("XIV_DISCORD", "0", 0); /* no Discord app to talk to */
     screen_size();
+    if (!getenv("XIV_TOUCH") || strcmp(getenv("XIV_TOUCH"), "0"))
+    {
+        xivboot_main_hook = touch_tick;
+        /* a pad 0 from the start (input.c's, which the touch controls' and a real controller's
+         * buttons are added to): the touch controls' own pad comes only once the main loop runs,
+         * after the game has looked for its pad, and the game's menus then took no D-pad presses
+         * from it (held, its repeats got through) */
+        setenv("XIV_VPAD", "1", 0);
+    }
 
     static char* args[MAX_ARGS + 3];
     int n = 0;

@@ -61,5 +61,8 @@ void input_rumble(int index, uint16_t low, uint16_t high);
 void input_vpad_set(const XPad* x);
 
 int input_pad_count(void);
+/* this gamepad (an SDL joystick id) is the game's first while set, 0 none: iOS's touch controls
+ * (tests/ios_touch.c) while they are shown */
+void input_prefer_pad(uint32_t id);
 int input_pad_state(int index, PadState* out);
 const char* input_pad_name(int index);
