@@ -235,14 +235,53 @@ def info_plist(t):
     }
 
 
+def app_icon(t, bundle, exe):
+    """The Mac app's icon (ffxivboot.exe's, else ffxivgame.exe's: build_xiv.exe_icns, from the
+    player's files at build time) as the app's: tools/ios_icon.m makes it a 1024x1024 opaque PNG,
+    actool compiles it into the bundle. Returns the Info.plist keys that name it; {} without one."""
+    folder = os.path.dirname(exe)
+    source = next((p for p in (os.path.join(folder, 'ffxivboot.exe'), exe) if os.path.exists(p)), None)
+    icns = os.path.join(t.out, 'AppIcon.icns')
+    if not source or not build_xiv.exe_icns(source, icns):
+        print('no icon: the game folder has no exe with one')
+        return {}
+    tool = os.path.join(ROOT, 'build', 'bin', 'ios_icon')
+    src = os.path.join(HERE, 'ios_icon.m')
+    if not os.path.exists(tool) or os.path.getmtime(tool) < os.path.getmtime(src):
+        os.makedirs(os.path.dirname(tool), exist_ok=True)
+        run(['clang', '-fobjc-arc', '-O2', '-framework', 'CoreGraphics', '-framework', 'Foundation',
+             '-framework', 'ImageIO', src, '-o', tool])
+    cat = os.path.join(t.out, 'Assets.xcassets')
+    icon = os.path.join(cat, 'AppIcon.appiconset')
+    shutil.rmtree(cat, ignore_errors=True)
+    os.makedirs(icon)
+    run([tool, icns, os.path.join(icon, 'icon.png')])
+    with open(os.path.join(icon, 'Contents.json'), 'w') as f:
+        json.dump({'images': [{'filename': 'icon.png', 'idiom': 'universal', 'platform': 'ios', 'size': '1024x1024'}],
+                   'info': {'author': 'xcode', 'version': 1}}, f)
+    with open(os.path.join(cat, 'Contents.json'), 'w') as f:
+        json.dump({'info': {'author': 'xcode', 'version': 1}}, f)
+    partial = os.path.join(t.out, 'icon-info.plist')
+    run(['xcrun', 'actool', cat, '--compile', bundle, '--platform', t.sdk, '--minimum-deployment-target', MIN_IOS,
+         '--app-icon', 'AppIcon', '--target-device', 'iphone', '--target-device', 'ipad',
+         '--output-partial-info-plist', partial], stdout=subprocess.DEVNULL)
+    with open(partial, 'rb') as f:
+        return plistlib.load(f)
+
+
 def app(t, a):
     exe = xivboot(t, a.exe)
     bundle = os.path.join(t.out, APP_NAME + '.app')
     shutil.rmtree(bundle, ignore_errors=True)
     os.makedirs(bundle)
     shutil.copy(exe, os.path.join(bundle, EXE_NAME))
+    info = info_plist(t)
+    try:
+        info.update(app_icon(t, bundle, a.exe))
+    except (subprocess.CalledProcessError, OSError) as e:
+        print('no icon: %s' % e)
     with open(os.path.join(bundle, 'Info.plist'), 'wb') as f:
-        plistlib.dump(info_plist(t), f, fmt=plistlib.FMT_BINARY)
+        plistlib.dump(info, f, fmt=plistlib.FMT_BINARY)
     with open(os.path.join(bundle, 'PkgInfo'), 'w') as f:
         f.write('APPL????')
     if t.sdk == 'iphonesimulator':
