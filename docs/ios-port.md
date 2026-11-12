@@ -32,6 +32,36 @@ Things to establish on the Mac:
 - how much memory the game uses in a busy zone (Activity Monitor, or the runtime's own log). This
   number decides how the iPad build has to treat memory.
 
+## Step 0 findings (on the Mac, 2026-11-11)
+
+- The stock app failed at patching. The disc's ffxivboot asks ver01.ffxiv.com:54996 for its
+  version check, the runtime sends that to the server, and prod has nothing on 54996. The request
+  times out, the boot throws a C++ exception the runtime cannot dispatch yet ("guest SEH dispatch
+  is not supported yet") and the process ends. The install was still at the disc's 2010.07.10.
+- The disc's ffxivboot downloads patches only by BitTorrent, and only torrents whose signature
+  checks out against the certificate in its resource 111. Prod's patch server (Kodama, port 17742)
+  serves plain HTTP downloads with no signature, so the stock patcher cannot use it. Support for
+  the official patcher on prod (Project-Meteor-Web) is being added separately.
+- Kodama's boot check is GET /http/<channel>/<boot version>. Its game check is
+  POST /http/<channel>/<game version>/<any id> and always lists all 51 game patches with their
+  SHA-1, so filter by version. Both need User-Agent: FFXIV PATCH CLIENT. The game check hashes
+  every patch on the server, so call it once and keep the reply.
+- `tools/xiv_patch.py` applies the downloaded patches without the game's updater. In a 1.x patch
+  every ETRY block that carries data holds the whole new file, so each file is checked against the
+  entry's SHA-1 before and after it is written. Applied to the disc install it gives boot
+  2010.09.18.0000 and game 2012.09.19.0001, and the four programs match the retail 1.23b SHA-256
+  values in `tools/xiv_e2e.sh`.
+- Prod's login is not Meteor's PHP page. `tools/xiv_login.py --kodama --server
+  http://<host>:17741` posts to /oauth/ffxiv/login/login.send and reads the session id.
+- The first config.sys asked for a 2112x1188 window, which is larger than a 14 inch MacBook Pro's
+  screen (1512x982 points), and the window cannot be resized. The first window is now the largest
+  16:9 size within nine tenths of the main display's usable area. Existing installs keep their
+  config.sys; `tools/xiv_config.py --resolution WxH` changes it while the game is closed. Wanted
+  later: a settings window for players on the Mac (window size, full screen and the rest of
+  config.sys), since `xiv_config.py` is command line only.
+- The Mac's internal disk is nearly full, so the patches, the patched game folder and this
+  checkout's build/ and generated/ (symlinks) live on an external drive.
+
 ## What xi-on-anything already has for iOS (read in its source)
 
 - `tools/build_ios.py` builds an .app with Xcode's clang for `arm64-apple-ios17.0`, for the
