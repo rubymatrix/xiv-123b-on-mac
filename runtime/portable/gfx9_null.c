@@ -137,7 +137,12 @@ void g9_present(G9Tex* backbuffer)
     if (next.tv_nsec >= 1000000000)
         next.tv_sec++, next.tv_nsec -= 1000000000;
     if (now.tv_sec < next.tv_sec || (now.tv_sec == next.tv_sec && now.tv_nsec < next.tv_nsec))
-        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+    {
+        struct timespec wait = { next.tv_sec - now.tv_sec, next.tv_nsec - now.tv_nsec };
+        if (wait.tv_nsec < 0)
+            wait.tv_sec--, wait.tv_nsec += 1000000000;
+        nanosleep(&wait, NULL); /* macOS has no clock_nanosleep */
+    }
     else
         next = now;
 }

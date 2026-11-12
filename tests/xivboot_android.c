@@ -104,8 +104,11 @@ int main(int argc, char** argv)
         fflush(NULL);
         exit(1);
     }
+    /* SDL sets the activity's orientation when it makes the window, over the manifest's: without the
+     * hint it chose the phone's natural one (portrait), and the window came out 1080x2400 */
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     setenv("XIV_DOCUMENTS", files, 0); /* the game's My Games under the app's files */
-    setenv("XIV_DISCORD", "0", 0);
+    setenv("XIV_DISCORD", "log", 0); /* no Discord app: where the game is goes to the log ([state]) */
     screen_size();
     if (!getenv("XIV_ARGS"))
         fprintf(stderr, "[android] no XIV_ARGS in run.args: the game will not get past its title\n");

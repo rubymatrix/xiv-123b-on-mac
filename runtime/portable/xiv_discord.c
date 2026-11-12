@@ -343,6 +343,8 @@ static int send_activity(const char* activity)
     return ipc_send(1, msg);
 }
 
+static int g_log_only; /* XIV_DISCORD=log */
+
 /* ---- the hooks ------------------------------------------------------------------------------- */
 
 void xiv_discord_init(void)
@@ -352,6 +354,7 @@ void xiv_discord_init(void)
     const char* nm = getenv("XIV_DISCORD_NAME");
     if (off && !strcmp(off, "0"))
         return;
+    g_log_only = off && !strcmp(off, "log");
     snprintf(g_app_id, sizeof g_app_id, "%s", id && id[0] ? id : DISCORD_APP_ID);
     g_show_name = !(nm && !strcmp(nm, "0"));
     g_start = (int64_t)time(NULL);
@@ -370,6 +373,18 @@ void xiv_discord_frame(void)
         return;
     g_next_poll = now + POLL_NS;
 
+    if (g_log_only) /* XIV_DISCORD=log: where the game is, in the log, and no Discord */
+    {
+        static char said[1024];
+        build_activity(g_pending, sizeof g_pending);
+        if (strcmp(g_pending, said))
+        {
+            const char* d = strstr(g_pending, "\"details\":\"");
+            rt_log("[state] %.*s\n", d ? (int)(strcspn(d + 11, "\"")) : 0, d ? d + 11 : "");
+            snprintf(said, sizeof said, "%s", g_pending);
+        }
+        return;
+    }
     if (g_fd < 0)
     {
         if (now < g_next_try)

@@ -206,6 +206,34 @@ def adb(*args, check=True, capture=False):
     return subprocess.run([tool] + list(args), check=check, capture_output=capture, text=True)
 
 
+def push_game(game):
+    """the game folder into the app's files, as one tar stream unpacked by the device's tar (adb
+    exec-in): adb push of the whole folder hung before sending anything (215,000 files). Run the app
+    once first, so the folder is its own. Progress: @progress push <files> <total>."""
+    import tarfile
+    names = []
+    for d, dirs, files in os.walk(game):
+        dirs.sort()
+        for f in sorted(files):
+            if f != '.DS_Store':
+                names.append(os.path.join(d, f))
+    total = len(names)
+    tool = shutil.which('adb') or str(SDK / 'platform-tools' / ('adb' + EXE))
+    p = subprocess.Popen([tool, 'exec-in', 'sh', '-c', 'mkdir -p "%s" && cd "%s" && tar -xf -' % (FILES, FILES)],
+                         stdin=subprocess.PIPE)
+    base = os.path.dirname(game)
+    with tarfile.open(fileobj=p.stdin, mode='w|', format=tarfile.PAX_FORMAT) as tar:
+        for i, path in enumerate(names):
+            tar.add(path, arcname=os.path.relpath(path, base), recursive=False)
+            if i % 2000 == 0:
+                print('@progress push %d %d' % (i, total), flush=True)
+    p.stdin.close()
+    if p.wait():
+        raise SystemExit('the device could not unpack the game (adb exec-in tar)')
+    print('@progress push %d %d' % (total, total), flush=True)
+    print('pushed %d files' % total)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('target', choices=['lib', 'apk', 'install', 'push-game', 'run', 'log'])
@@ -224,8 +252,7 @@ def main():
     elif a.target == 'push-game':
         if not a.game:
             raise SystemExit('push-game needs --game <FINAL FANTASY XIV folder>')
-        adb('shell', 'mkdir', '-p', FILES)
-        adb('push', '--sync', os.path.abspath(a.game), FILES + '/')
+        push_game(os.path.abspath(a.game))
     elif a.target == 'run':
         if a.args:
             adb('push', a.args, FILES + '/run.args')

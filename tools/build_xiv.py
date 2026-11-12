@@ -62,9 +62,12 @@ PORTABLE = ['runtime/runtime.c', 'runtime/portable/plat_posix.c', 'runtime/porta
 
 
 # Win32 shims on SDL3 (windowing, input, timers, sockets, audio) shared with FFXI.
+# XIV_GFX=null: the back end that draws nothing (gfx9_null.c) in place of Metal, as Android's first builds
 HOST = ['runtime/portable/user32.c', 'runtime/portable/input.c', 'runtime/portable/autoinput.c', 'runtime/portable/ws2.c',
         'runtime/portable/dinput.c', 'runtime/portable/dsound.c', 'runtime/portable/d3d9.c', 'runtime/portable/d3dx9.c', 'runtime/portable/xaudio2.c',
         'runtime/portable/sm_msl.c', 'runtime/portable/gfx9_metal.m']
+if os.environ.get('XIV_GFX') == 'null':
+    HOST = [s for s in HOST if s != 'runtime/portable/gfx9_metal.m'] + ['runtime/portable/gfx9_null.c']
 GFX_LIBS = ['-framework', 'Metal', '-framework', 'QuartzCore', '-framework', 'Foundation', '-weak_framework', 'MetalFX']
 
 

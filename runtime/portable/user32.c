@@ -28,6 +28,13 @@
 #include "thunk.h"
 #include "user32.h"
 
+/* a phone or tablet (iOS, Android): no desktop, a screen keyboard, the mouse is the touches */
+#if (defined(__APPLE__) && TARGET_OS_IPHONE) || defined(__ANDROID__)
+#define XIV_TOUCH_OS 1
+#else
+#define XIV_TOUCH_OS 0
+#endif
+
 #define WM_CREATE 0x0001
 #define WM_DESTROY 0x0002
 #define WM_MOVE 0x0003
@@ -97,7 +104,7 @@ static Wnd* wnd(uint32_t hwnd)
     return i < MAX_WINDOWS && g_wnds[i].used ? &g_wnds[i] : NULL;
 }
 
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+#if XIV_TOUCH_OS
 /* iOS: the cursor is where the last mouse event the game was given put it (window points), not
  * SDL's mouse position: SDL moves that to every touch, the touch controls' presses too, and the game
  * would take each D-pad tap for the mouse moving (its cursor leaves the pad's selection, and the
@@ -700,7 +707,7 @@ static void pump(void)
             if (w)
             {
                 int mx, my;
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+#if XIV_TOUCH_OS
                 g_evt_x = e.motion.x, g_evt_y = e.motion.y;
 #endif
                 to_client(w, e.motion.x, e.motion.y, &mx, &my);
@@ -725,7 +732,7 @@ static void pump(void)
             if (!msg)
                 break;
             int bx, by;
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+#if XIV_TOUCH_OS
             g_evt_x = e.button.x, g_evt_y = e.button.y;
 #endif
             to_client(w, e.button.x, e.button.y, &bx, &by);
@@ -1039,7 +1046,9 @@ static int show_window(Wnd* w, int show)
         {
             SDL_ShowWindow(w->sdl);
             SDL_RaiseWindow(w->sdl);
-            SDL_StartTextInput(w->sdl);
+#if !XIV_TOUCH_OS
+            SDL_StartTextInput(w->sdl); /* a phone's would bring up its keyboard: there it is the text fields' (user32_text_field) */
+#endif
         }
         call_wndproc(w, WM_SHOWWINDOW, 1, 0);
         call_wndproc(w, WM_ACTIVATEAPP, 1, 0);
@@ -1126,7 +1135,7 @@ void user32_main_tick(void)
             SDL_GetWindowSize(g_wnds[i].sdl, &g_wnds[i].sw, &g_wnds[i].sh);
     float x = 0, y = 0;
     SDL_GetGlobalMouseState(&x, &y); /* on the main thread: no marshalling */
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+#if XIV_TOUCH_OS
     {
         /* iOS has no desktop: SDL's "global" position is the one in the window, which is where the game
          * placed it (its own centring, w->x, w->y); made the desktop's as GetCursorPos expects */
@@ -2133,11 +2142,11 @@ static void sh_DrawTextW(Guest* g) { draw_text(g, 1); }
 
 /* --- IMM32: the US client with no IME: a context that is never open ----------------------------------------- */
 /* A text field of the game's took or lost the keyboard (xiv_misc.c: ImmAssociateContext with a
- * context, or with none). On iOS the screen keyboard comes up for it and goes away after; on the Mac
+ * context, or with none). On iOS and Android the screen keyboard comes up for it and goes away after; on the Mac
  * text input stays on, as it always was. */
 void user32_text_field(uint32_t hwnd, int on)
 {
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+#if XIV_TOUCH_OS
     static int was = -1;
     Wnd* w = wnd(hwnd);
     if (!w || !w->sdl || on == was)

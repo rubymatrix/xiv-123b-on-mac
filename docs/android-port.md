@@ -41,4 +41,20 @@ game, as on iOS (docs/ios-port.md). Started 2026-11-12 with a Pixel 6a.
 
 ## Where it stands
 
-Milestone 1 under way.
+Milestone 1 works on the Pixel 6a: the game signs in, goes through the lobby and character select,
+and enters the world, with sound, all without drawing anything. The title and the lobby run at the
+60 frames a second the null renderer paces to; in the world the game makes about 19 a second, so
+the CPU side is the limit there and wants measuring before the renderer adds its own cost.
+
+Things found on the way:
+
+- SDL sets the activity's orientation when it makes the window and overrides the manifest. Without
+  SDL_HINT_ORIENTATIONS it chose portrait, and the game's clicks were mapped through a 1080x2400
+  window. xivboot_android.c sets the hint to landscape.
+- Starting SDL text input brings up the screen keyboard, so on Android, as on iOS, it is on only
+  while one of the game's text fields has the keyboard (user32_text_field).
+- adb push of the game's 215,000 files stalls; push-game streams a tar into the app's folder.
+- A sign-in session is good for one entry into the world. A scripted run needs a new one
+  (tools/xiv_login.py) each time, or it stops at character select.
+- XIV_DISCORD=log writes the game's state ([state] lines) to the log, and XIV_NETLOG=1 traces each
+  connection, which together show how far a run got without a picture.
