@@ -24,6 +24,7 @@ void xivboot_set_fps_cap(int fps);
 void ios_touch_init(void);              /* ios_touch.c */
 void ios_touch_frame(int in_game);
 int ios_power_fps(const char** why);    /* ios_power.m */
+int ios_signin(char* server, size_t server_n, char* arg, size_t arg_n); /* ios_signin.m */
 
 static int g_touch_on, g_power_on;
 
@@ -125,7 +126,10 @@ int main(int argc, char** argv)
     if (!isatty(2))
     {
         snprintf(path, sizeof path, "%s/xivboot.log", docs);
-        if (freopen(path, "w", stderr))
+        FILE* empty = fopen(path, "w"); /* emptied once; then both append, or stderr's writes overwrite stdout's */
+        if (empty)
+            fclose(empty);
+        if (freopen(path, "a", stderr))
             setvbuf(stderr, NULL, _IOLBF, 0);
         if (freopen(path, "a", stdout))
             setvbuf(stdout, NULL, _IOLBF, 0);
@@ -148,6 +152,21 @@ int main(int argc, char** argv)
                         "Documents (Finder or the Files app)\n", game);
         fflush(NULL);
         exit(1);
+    }
+    /* the sign-in screen (ios_signin.m) unless run.args gives the launch argument (XIV_ARGS) */
+    if (!getenv("XIV_ARGS"))
+    {
+        char server[256], arg[512];
+        if (ios_signin(server, sizeof server, arg, sizeof arg))
+        {
+            setenv("XIV_ARGS", arg, 1);
+            setenv("XIV_TICK", "0x10000", 1);
+            setenv("XIV_SERVER_HOST", server, 0); /* run.args may name others */
+            setenv("XIV_LOBBY", server, 0);
+            fprintf(stderr, "[ios] signed in; server %s\n", server);
+        }
+        else
+            fprintf(stderr, "[ios] no sign-in: the game will not get past its title\n");
     }
     /* the game's "My Documents" is the app's Documents: its settings, logs and screenshots land in
      * Documents/My Games/FINAL FANTASY XIV, where the Files app shows them */

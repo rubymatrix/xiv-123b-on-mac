@@ -48,7 +48,7 @@ APP_ID = 'local.xiv123b.anywhere'
 SDL = 'sdl3-ios'
 # M1 is the A14's core: every iPad with an M chip, and iPhone 12 and later
 CPU = '-mcpu=apple-a14'
-FRAMEWORKS = ['Metal', 'QuartzCore', 'Foundation', 'CoreText', 'CoreGraphics', 'UIKit']  # CoreText: the touch controls' labels
+FRAMEWORKS = ['Metal', 'QuartzCore', 'Foundation', 'CoreText', 'CoreGraphics', 'UIKit', 'Security']  # Security: the sign-in's keychain  # CoreText: the touch controls' labels
 WEAK_FRAMEWORKS = ['MetalFX']  # device builds only: the simulator's SDK has no MetalFX (gfx9_upscale_none.h)
 ENTITLEMENTS = {
     'com.apple.developer.kernel.extended-virtual-addressing': True,
@@ -183,6 +183,8 @@ def runtime_objs(t, without_game=False):
     objs = t.compile(sources, 'runtime', ours)
     objs += t.compile(['tests/xivboot.c'], 'xivboot', ours + ['-Dmain=xivboot_main'])
     objs += t.compile(['tests/xivboot_ios.c', 'tests/ios_touch.c', 'tests/ios_power.m'], 'entry', ours)
+    objs += t.compile(['tests/xiv_args.c'], 'entry-args', ours)
+    objs += t.compile(['tests/ios_signin.m'], 'entry-arc', ours + ['-fobjc-arc'])  # the sign-in screen: ARC
     return objs, archive, frameworks
 
 
@@ -231,6 +233,8 @@ def info_plist(t):
         'LSApplicationCategoryType': 'public.app-category.role-playing-games',
         'GCSupportsControllerUserInteraction': True,
         'UIApplicationSupportsIndirectInputEvents': True,  # a mouse or trackpad's pointer and clicks
+        # the sign-in posts to the server's login page, which a private server serves over plain http
+        'NSAppTransportSecurity': {'NSAllowsArbitraryLoads': True},
         'GCSupportedGameControllers': [{'ProfileName': 'ExtendedGamepad'}],
     }
 
