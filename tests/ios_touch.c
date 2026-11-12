@@ -103,6 +103,7 @@ static Control g_ctl[GFX_TOUCH_MAX];
 static int g_nctl;
 static int g_shown;              /* the controls are up (the game, no real controller) */
 static int g_hidden;             /* put away with the toggle */
+static int g_bold;               /* high contrast (the toggle's second state; Documents/touch-style.txt) */
 static float g_density = 1.0f;   /* the window's pixels a point */
 static float g_stick_x, g_stick_y; /* the stick's resting place */
 static int g_editing;            /* the layout is being edited (the toggle held) */
@@ -293,6 +294,39 @@ static void layout_path(char* out, size_t n)
 {
     const char* home = getenv("HOME");
     snprintf(out, n, "%s/Documents/touch-layout.txt", home ? home : ".");
+}
+
+/* the controls' look, kept across runs: Documents/touch-style.txt, "bold" for high contrast */
+static void style_path(char* out, size_t n)
+{
+    const char* home = getenv("HOME");
+    snprintf(out, n, "%s/Documents/touch-style.txt", home ? home : ".");
+}
+
+static void load_style(void)
+{
+    char path[1100], word[16] = "";
+    style_path(path, sizeof path);
+    FILE* f = fopen(path, "r");
+    if (f)
+    {
+        if (fscanf(f, "%15s", word) != 1)
+            word[0] = 0;
+        fclose(f);
+    }
+    g_bold = !strcmp(word, "bold");
+}
+
+static void save_style(void)
+{
+    char path[1100];
+    style_path(path, sizeof path);
+    FILE* f = fopen(path, "w");
+    if (f)
+    {
+        fputs(g_bold ? "bold\n" : "normal\n", f);
+        fclose(f);
+    }
 }
 
 static void load_layout(void)
@@ -628,8 +662,16 @@ static void finger_up(const SDL_TouchFingerEvent* e, Finger* f, float x, float y
             g_editing = 0, save_layout();
         else if (e->timestamp - f->t0 >= EDIT_HOLD_NS) /* held: the layout edited */
             g_editing = 1, g_hidden = 0;
-        else
-            g_hidden = !g_hidden;
+        else /* a tap: shown, then high contrast, then put away, then shown again */
+        {
+            if (g_hidden)
+                g_hidden = 0;
+            else if (g_bold)
+                g_bold = 0, g_hidden = 1;
+            else
+                g_bold = 1;
+            save_style();
+        }
         memset(f, 0, sizeof *f);
         refresh(SDL_GetWindowFromID(e->windowID));
         return;
@@ -834,8 +876,8 @@ static void draw(void)
         GfxTouchShape* t = &s[n++];
         memset(t, 0, sizeof *t);
         t->x = c->x * d, t->y = c->y * d, t->hw = c->hw * d, t->hh = c->hh * d;
-        t->kind = c->kind, t->sym = c->sym, t->pressed = pressed[i] || (c->group && c->group == dragged);
-        t->alpha = 0.85f * fade;
+        t->kind = c->kind, t->sym = c->sym, t->pressed = (pressed[i] || (c->group && c->group == dragged)) | (g_bold ? 2 : 0);
+        t->alpha = (g_bold ? 0.97f : 0.85f) * fade;
         if (g_editing && c->group) /* editing: the groups that move pulse */
             t->alpha = 0.7f + 0.25f * sinf((float)SDL_GetTicks() / 160.0f);
         if (c->label)
@@ -852,11 +894,12 @@ static void draw(void)
                 dx *= STICK / len, dy *= STICK / len;
             kx += dx, ky += dy;
         }
-        float a = (stick ? 0.9f : 0.5f) * fade;
+        float a = (stick ? 0.9f : g_bold ? 0.85f : 0.5f) * fade;
         if (g_editing)
             a = 0.7f + 0.25f * sinf((float)SDL_GetTicks() / 160.0f);
-        s[n++] = (GfxTouchShape){ bx * d, by * d, STICK * d, STICK * d, GFX_TOUCH_RING, 0, 0, a, "" };
-        s[n++] = (GfxTouchShape){ kx * d, ky * d, KNOB * d, KNOB * d, GFX_TOUCH_KNOB, 0, stick != NULL, a, "" };
+        int bold = g_bold ? 2 : 0;
+        s[n++] = (GfxTouchShape){ bx * d, by * d, STICK * d, STICK * d, GFX_TOUCH_RING, 0, bold, a, "" };
+        s[n++] = (GfxTouchShape){ kx * d, ky * d, KNOB * d, KNOB * d, GFX_TOUCH_KNOB, 0, (stick != NULL) | bold, a, "" };
     }
     gfx_set_touch_shapes(s, n);
 }
@@ -900,6 +943,7 @@ void ios_touch_frame(int in_game)
 
 void ios_touch_init(void)
 {
+    load_style();
     g_lock = SDL_CreateMutex();
     SDL_SetEventFilter(keep_event, NULL);
     SDL_AddEventWatch(touch, NULL);

@@ -72,10 +72,16 @@ static const char TOUCH_MSL[] =
     "  float top = saturate(p.y * 0.5 + 0.5);\n"
     "  float3 glass = mix(float3(0.30, 0.30, 0.33), float3(0.11, 0.11, 0.13), top);\n"
     "  float fill = 0.6;\n"
-    "  if (u.pressed != 0u) glass = mix(glass, float3(0.75), 0.45), fill = 0.8;\n"
-    "  if (u.kind == 3u) { glass = float3(0.1); fill = 0.22; rim *= 1.6; }\n" /* the stick's base: faint, a stronger rim */
-    "  if (u.kind == 4u) { glass = mix(float3(0.85), float3(0.6), top); fill = 0.85; }\n"
-    "  float3 col = mix(mix(glass, float3(1.0), rim * 0.35), inkc, ink);\n"
+    /* pressed: bit 0 the control is held, bit 1 high contrast (the toggle's second state): light glass,
+     * nearly opaque, a dark rim and dark ink, to stand out over bright and dark scenes alike */
+    "  bool bold = (u.pressed & 2u) != 0u;\n"
+    "  float3 rimc = float3(1.0); float rimk = 0.35;\n"
+    "  if (bold) { glass = mix(float3(0.98), float3(0.80), top); fill = 0.93; rimc = float3(0.0); rimk = 0.9;\n"
+    "              inkc = u.sym != 0u ? inkc * 0.55 : float3(0.04); }\n"
+    "  if ((u.pressed & 1u) != 0u) glass = bold ? mix(glass, float3(0.45), 0.5) : mix(glass, float3(0.75), 0.45), fill = bold ? 0.97 : 0.8;\n"
+    "  if (u.kind == 3u) { glass = bold ? float3(0.95) : float3(0.1); fill = bold ? 0.45 : 0.22; rim *= 1.6; }\n" /* the stick's base: faint, a stronger rim */
+    "  if (u.kind == 4u) { glass = mix(float3(0.85), float3(0.6), top); fill = bold ? 0.97 : 0.85; }\n"
+    "  float3 col = mix(mix(glass, rimc, saturate(rim * rimk)), inkc, ink);\n"
     "  float a = max(body * mix(fill, 0.97, ink), shadow * (1.0 - body)) * u.alpha;\n"
     "  return float4(body > 0.0 ? col : float3(0.0), a);\n"
     "}\n"
