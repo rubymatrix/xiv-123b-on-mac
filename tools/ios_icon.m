@@ -1,7 +1,7 @@
 /* The iOS app's icon from the Mac's (tools/build_xiv_ios.py): a picture (the .icns build_xiv.py makes
- * from the player's ffxivboot.exe) cropped to what is not transparent, drawn on opaque white and
- * scaled to the 1024x1024 PNG an asset catalog takes. iOS masks it to its own shape and would fill
- * transparent corners black.
+ * from the player's ffxivboot.exe) cropped to what is not transparent, drawn on opaque white at
+ * INSET of the 1024x1024 PNG an asset catalog takes, centred. iOS masks the icon to its own rounded
+ * shape (cutting the tile's frame if it reached the edge) and would fill transparent corners black.
  *   ios_icon <picture> <out.png> */
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
@@ -59,11 +59,13 @@ int main(int argc, char** argv)
         /* bitmap rows run top down, CGImage crops too */
         CGImageRef crop = CGImageCreateWithImageInRect(im, CGRectMake(x0, y0, x1 - x0 + 1, y1 - y0 + 1));
         const size_t N = 1024;
+        const double INSET = 0.84; /* the tile's share of the icon: its frame clear of iOS's mask */
         CGContextRef out = CGBitmapContextCreate(NULL, N, N, 8, N * 4, rgb, (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
         CGContextSetRGBFillColor(out, 1, 1, 1, 1);
         CGContextFillRect(out, CGRectMake(0, 0, N, N));
         CGContextSetInterpolationQuality(out, kCGInterpolationHigh);
-        CGContextDrawImage(out, CGRectMake(0, 0, N, N), crop);
+        double side = N * INSET, at = (N - side) * 0.5;
+        CGContextDrawImage(out, CGRectMake(at, at, side, side), crop);
         CGImageRef done = CGBitmapContextCreateImage(out);
         NSURL* to = [NSURL fileURLWithPath:@(argv[2])];
         CGImageDestinationRef dst = CGImageDestinationCreateWithURL((__bridge CFURLRef)to, CFSTR("public.png"), 1, NULL);
