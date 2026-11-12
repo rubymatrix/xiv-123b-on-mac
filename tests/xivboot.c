@@ -223,8 +223,16 @@ static void quit_signal(int sig, siginfo_t* info, void* ctx)
     _Exit(0);
 }
 
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+int mac_launch(int* argc, char*** argv); /* mac_signin.m: opened from Finder, the game folder and the sign-in */
+#endif
+
 int main(int argc, char** argv)
 {
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+    if (!mac_launch(&argc, &argv))
+        return 0;
+#endif
     if (argc < 2)
     {
         printf("usage: xivboot <ffxivgame.exe> [game folder] [registry .reg]\n");

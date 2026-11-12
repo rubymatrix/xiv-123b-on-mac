@@ -8,50 +8,11 @@
  * the password in the keychain while "Remember password" is on. Runs on the main thread: the window is shown and the run
  * loop turned until a sign-in succeeds; then the window goes and the game makes its own. */
 #import <Foundation/Foundation.h>
-#import <Security/Security.h>
 #import <UIKit/UIKit.h>
 #include <string.h>
 
 #include "xiv_args.h"
-
-static NSString* const kService = @"FINAL FANTASY XIV 1.23b sign-in";
-
-/* --- the password in the keychain: one per login page and username --------------------------- */
-static NSDictionary* key_query(NSString* login, NSString* user)
-{
-    return @{ (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
-              (__bridge id)kSecAttrService : kService,
-              (__bridge id)kSecAttrAccount : [NSString stringWithFormat:@"%@ %@", user, login] };
-}
-
-static NSString* key_load(NSString* login, NSString* user)
-{
-    NSMutableDictionary* q = [key_query(login, user) mutableCopy];
-    q[(__bridge id)kSecReturnData] = @YES;
-    CFTypeRef data = NULL;
-    if (SecItemCopyMatching((__bridge CFDictionaryRef)q, &data) != errSecSuccess || !data)
-        return nil;
-    return [[NSString alloc] initWithData:(__bridge_transfer NSData*)data encoding:NSUTF8StringEncoding];
-}
-
-static void key_save(NSString* login, NSString* user, NSString* password)
-{
-    SecItemDelete((__bridge CFDictionaryRef)key_query(login, user));
-    if (!password)
-        return;
-    NSMutableDictionary* q = [key_query(login, user) mutableCopy];
-    q[(__bridge id)kSecValueData] = [password dataUsingEncoding:NSUTF8StringEncoding];
-    q[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
-    SecItemAdd((__bridge CFDictionaryRef)q, NULL);
-}
-
-/* a form field's value: everything but letters, digits and -._~ percent-encoded (a password's & = +) */
-static NSString* form_value(NSString* v)
-{
-    NSCharacterSet* keep = [NSCharacterSet characterSetWithCharactersInString:
-        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"];
-    return [v stringByAddingPercentEncodingWithAllowedCharacters:keep];
-}
+#import "signin_core.h"
 
 /* --- shared field and label makers ------------------------------------------------------------ */
 static UITextField* make_field(NSString* placeholder, BOOL secure, id<UITextFieldDelegate> delegate)
@@ -104,11 +65,7 @@ static void place_form(UIViewController* vc, UIStackView* form, CGFloat top)
     ]];
 }
 
-static NSString* saved(NSString* key)
-{
-    return [[NSUserDefaults.standardUserDefaults stringForKey:key]
-        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet] ?: @"";
-}
+static NSString* saved(NSString* key) { return signin_saved(key); }
 
 /* --- the server: a sheet behind the gear --------------------------------------------------------- */
 @interface XivServerSheet : UIViewController <UITextFieldDelegate>
@@ -129,14 +86,14 @@ static NSString* saved(NSString* key)
     self.server = make_field(@"Server address, e.g. 203.0.113.5", NO, self);
     self.server.keyboardType = UIKeyboardTypeURL;
     self.server.text = saved(@"xiv.server");
-    self.login = make_field(@"Login page, e.g. http://203.0.113.5:17741", NO, self);
+    self.login = make_field(@"Login page (found from the server when it can be)", NO, self);
     self.login.keyboardType = UIKeyboardTypeURL;
     self.login.returnKeyType = UIReturnKeyDone;
     self.login.text = saved(@"xiv.login");
     UIColor* dim = UIColor.secondaryLabelColor;
     UIStackView* form = [[UIStackView alloc] initWithArrangedSubviews:@[
         make_label(@"SERVER ADDRESS (THE LOBBY)", UIFontTextStyleFootnote, dim), self.server,
-        make_label(@"LOGIN PAGE", UIFontTextStyleFootnote, dim), self.login
+        make_label(@"LOGIN PAGE (OPTIONAL)", UIFontTextStyleFootnote, dim), self.login
     ]];
     form.axis = UILayoutConstraintAxisVertical;
     form.spacing = 6;
@@ -151,6 +108,25 @@ static NSString* saved(NSString* key)
     else
         [self finish];
     return NO;
+}
+
+/* leaving the server's field: what the server says of itself fills the login page */
+- (void)textFieldDidEndEditing:(UITextField*)f
+{
+    if (f != self.server || !self.server.text.length)
+        return;
+    [NSUserDefaults.standardUserDefaults setObject:self.server.text forKey:@"xiv.server"];
+    signin_autofill(self.server.text, ^(BOOL found) {
+        if (found)
+            self.login.text = signin_saved(@"xiv.login");
+    });
+}
+
+/* the login page as typed: the player's own unless it is still the one found */
+- (void)textFieldDidChangeSelection:(UITextField*)f
+{
+    if (f == self.login && ![f.text isEqualToString:signin_saved(@"xiv.login")])
+        [NSUserDefaults.standardUserDefaults setBool:NO forKey:@"xiv.login_auto"];
 }
 
 - (void)finish
@@ -200,9 +176,9 @@ static NSString* saved(NSString* key)
 
     /* Remember password, then Sign In, on one row */
     self.remember = [UISwitch new];
-    self.remember.on = [d objectForKey:@"xiv.remember"] ? [d boolForKey:@"xiv.remember"] : YES;
+    self.remember.on = signin_remember();
     if (self.remember.on && saved(@"xiv.login").length && self.user.text.length)
-        self.password.text = key_load(saved(@"xiv.login"), self.user.text);
+        self.password.text = signin_key_load(saved(@"xiv.login"), self.user.text);
     UILabel* rl = make_label(@"Remember password", UIFontTextStyleSubheadline, UIColor.labelColor);
     self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     self.spinner.hidesWhenStopped = YES;
@@ -231,7 +207,7 @@ static NSString* saved(NSString* key)
 - (void)viewDidAppear:(BOOL)animated
 {
     [super viewDidAppear:animated];
-    if (!saved(@"xiv.server").length || !saved(@"xiv.login").length) /* the first run: the server first */
+    if (!saved(@"xiv.server").length) /* the first run: the server first */
         [self showServer];
 }
 
@@ -242,7 +218,7 @@ static NSString* saved(NSString* key)
     sheet.done = ^{
         XivSignIn* s = me;
         if (s && !s.password.text.length && s.remember.on && saved(@"xiv.login").length && s.user.text.length)
-            s.password.text = key_load(saved(@"xiv.login"), s.user.text);
+            s.password.text = signin_key_load(saved(@"xiv.login"), s.user.text);
     };
     UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:sheet];
     nav.modalPresentationStyle = UIModalPresentationFormSheet;
@@ -269,12 +245,25 @@ static NSString* saved(NSString* key)
 {
     NSString* server = saved(@"xiv.server");
     NSString* login = saved(@"xiv.login");
-    NSString* login_key = login; /* the keychain's: the page as written in the settings */
     NSString* user = [self.user.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
     NSString* password = self.password.text ?: @"";
-    if (!server.length || !login.length)
+    if (!server.length)
     {
         [self showServer];
+        return;
+    }
+    if (!login.length) /* not found yet: ask the server, then sign in */
+    {
+        [self busy:YES status:@"Looking for the server's login page…"];
+        signin_autofill(server, ^(BOOL found) {
+            if (found)
+                [self signIn];
+            else
+            {
+                self.status.textColor = UIColor.systemRedColor;
+                [self busy:NO status:@"The server did not say where its login page is: enter it in the server settings (the gear)."];
+            }
+        });
         return;
     }
     if (!user.length || !password.length)
@@ -282,62 +271,22 @@ static NSString* saved(NSString* key)
         [self busy:NO status:@"Enter your username and password."];
         return;
     }
-    if (![login hasPrefix:@"http://"] && ![login hasPrefix:@"https://"])
-        login = [@"http://" stringByAppendingString:login];
-    while ([login hasSuffix:@"/"])
-        login = [login substringToIndex:login.length - 1];
-    NSURL* url = [NSURL URLWithString:[login stringByAppendingString:@"/oauth/ffxiv/login/login.send"]];
-    if (!url)
-    {
-        [self busy:NO status:@"The login page is not an address."];
-        return;
-    }
     [self.view endEditing:YES];
     [self busy:YES status:nil];
     self.status.textColor = UIColor.secondaryLabelColor;
     self.status.text = @"Signing in…";
-
-    NSString* body = [NSString stringWithFormat:@"sqexid=%@&password=%@", form_value(user), form_value(password)];
-    NSMutableURLRequest* req = [NSMutableURLRequest requestWithURL:url];
-    req.HTTPMethod = @"POST";
-    req.timeoutInterval = 20;
-    [req setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
-    req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
-
-    [[NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData* data, NSURLResponse* resp, NSError* err) {
-        NSString* text = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
-        NSString *sid = nil, *why = nil;
-        NSRange ok = text ? [text rangeOfString:@"login=auth,ok,sid,"] : NSMakeRange(NSNotFound, 0);
-        if (ok.location != NSNotFound && text.length >= NSMaxRange(ok) + 56)
-            sid = [text substringWithRange:NSMakeRange(NSMaxRange(ok), 56)];
-        else if (text && [text rangeOfString:@"login=auth,ng,err,"].location != NSNotFound)
+    signin_post(login, user, password, ^(NSString* sid, NSString* why) {
+        if (!sid)
         {
-            NSRange e = [text rangeOfString:@"login=auth,ng,err,"];
-            NSString* rest = [text substringFromIndex:NSMaxRange(e)];
-            NSRange q = [rest rangeOfString:@"\""];
-            why = q.location != NSNotFound ? [rest substringToIndex:q.location] : rest;
+            self.status.textColor = UIColor.systemRedColor;
+            [self busy:NO status:why];
+            return;
         }
-        else if (err)
-            why = err.localizedDescription;
-        else
-            why = [NSString stringWithFormat:@"The login page answered something else (HTTP %ld).",
-                            (long)((NSHTTPURLResponse*)resp).statusCode];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (!sid)
-            {
-                self.status.textColor = UIColor.systemRedColor;
-                [self busy:NO status:why];
-                return;
-            }
-            NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
-            [d setObject:user forKey:@"xiv.user"];
-            [d setBool:self.remember.on forKey:@"xiv.remember"];
-            key_save(login_key, user, self.remember.on ? password : nil);
-            self.status.textColor = UIColor.secondaryLabelColor;
-            [self busy:YES status:@"Signed in. Starting the game…"];
-            self.session = sid;
-        });
-    }] resume];
+        signin_keep(user, password, self.remember.on);
+        self.status.textColor = UIColor.secondaryLabelColor;
+        [self busy:YES status:@"Signed in. Starting the game…"];
+        self.session = sid;
+    });
 }
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations
@@ -368,7 +317,7 @@ int ios_signin(char* server, size_t server_n, char* arg, size_t arg_n)
             {
                 [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
             }
-        snprintf(server, server_n, "%s", saved(@"xiv.server").UTF8String);
+        snprintf(server, server_n, "%s", signin_lobby().UTF8String); /* the game connects there */
         int ok = xiv_launch_arg(form.session.UTF8String, XIV_ARGS_TICK, arg, arg_n);
         window.hidden = YES;
         window.rootViewController = nil;

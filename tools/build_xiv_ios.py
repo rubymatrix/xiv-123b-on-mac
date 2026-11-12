@@ -184,7 +184,7 @@ def runtime_objs(t, without_game=False):
     objs += t.compile(['tests/xivboot.c'], 'xivboot', ours + ['-Dmain=xivboot_main'])
     objs += t.compile(['tests/xivboot_ios.c', 'tests/ios_touch.c', 'tests/ios_power.m'], 'entry', ours)
     objs += t.compile(['tests/xiv_args.c'], 'entry-args', ours)
-    objs += t.compile(['tests/ios_signin.m'], 'entry-arc', ours + ['-fobjc-arc'])  # the sign-in screen: ARC
+    objs += t.compile(['tests/ios_signin.m', 'tests/signin_core.m'], 'entry-arc', ours + ['-fobjc-arc'])  # the sign-in: ARC
     return objs, archive, frameworks
 
 

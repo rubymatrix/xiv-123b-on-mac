@@ -69,6 +69,9 @@ HOST = ['runtime/portable/user32.c', 'runtime/portable/input.c', 'runtime/portab
 if os.environ.get('XIV_GFX') == 'null':
     HOST = [s for s in HOST if s != 'runtime/portable/gfx9_metal.m'] + ['runtime/portable/gfx9_null.c']
 GFX_LIBS = ['-framework', 'Metal', '-framework', 'QuartzCore', '-framework', 'Foundation', '-weak_framework', 'MetalFX']
+# the game opened from Finder: its folder and the sign-in window (tests/mac_signin.m), with ARC
+SIGNIN = ['tests/mac_signin.m', 'tests/signin_core.m', 'tests/xiv_args.c']
+SIGNIN_LIBS = ['-framework', 'AppKit', '-framework', 'Security']
 
 
 def run(cmd):
@@ -143,8 +146,8 @@ def compile_stale(sources, objdir, extra=(), gen_flags=None):
         src_time = max(os.path.getmtime(os.path.join(ROOT, s)), headers)
         if not os.path.exists(full) or os.path.getmtime(full) < src_time:
             flags = CFLAGS + list(extra) + ((gen_flags or GEN_FLAGS) if s.startswith('generated/') else [])
-            if s.endswith('.m'):  # Objective-C, references counted by hand
-                flags = [f for f in flags if f != '-std=c11'] + ['-fno-objc-arc']
+            if s.endswith('.m'):  # Objective-C, references counted by hand unless the call says ARC
+                flags = [f for f in flags if f != '-std=c11'] + ([] if '-fobjc-arc' in flags else ['-fno-objc-arc'])
             jobs.append(['clang', '-c'] + flags + [s, '-o', obj])
     if jobs:
         print('compiling %d of %d' % (len(jobs), len(sources)), flush=True)
@@ -202,8 +205,9 @@ def xivboot(exe, run_it, extra, debug=False, opt='-O1', pgo=None):
         objs = compile_stale(gen, 'build/xiv-dbg/gen', gen_flags=[opt, '-g', '-mcpu=apple-m1', '-w'])
         thirdparty.build('sdl3')
         objs += compile_stale(PORTABLE + HOST + ['tests/xivboot.c'], 'build/xiv-dbg/obj', thirdparty.flags('sdl3'))
+        objs += compile_stale(SIGNIN, 'build/xiv-dbg/signin', ['-fobjc-arc', '-I', 'tests'])
         run(['clang', '-o', 'build/xivboot-dbg', '-g', '-mcpu=apple-m1']
-            + objs + thirdparty.libs('sdl3') + GFX_LIBS + ['-lm', '-lpthread'])
+            + objs + thirdparty.libs('sdl3') + GFX_LIBS + SIGNIN_LIBS + ['-lm', '-lpthread'])
         if run_it:
             run(['build/xivboot-dbg', exe] + extra)
         return
@@ -225,6 +229,7 @@ def xivboot(exe, run_it, extra, debug=False, opt='-O1', pgo=None):
     objs = compile_stale(gen, gendir, gen_flags=GEN_FLAGS + pgo_flags)
     thirdparty.build('sdl3')
     objs += compile_stale(PORTABLE + HOST + ['tests/xivboot.c'], 'build/xiv/obj', thirdparty.flags('sdl3'))
+    objs += compile_stale(SIGNIN, 'build/xiv/signin', ['-fobjc-arc', '-I', 'tests'])
     # ThinLTO: the translated functions call each other across 291 files; inlining the small ones
     # into their callers needs the whole program (cache: relinks reuse unchanged modules)
     # -U: d3d9.c's profile dump finds the profile runtime only in --pgo gen builds
@@ -233,7 +238,7 @@ def xivboot(exe, run_it, extra, debug=False, opt='-O1', pgo=None):
     inl_flags = ['-Wl,-mllvm,-import-instr-limit=%d' % (int(inl) * 2), '-Wl,-mllvm,-inline-threshold=%s' % inl] if inl else []
     run_lto(['clang', '-o', 'build/xivboot', '-flto=thin', '-O3', '-mcpu=apple-m1', '-Wl,-U,___llvm_profile_write_file'] + pgo_flags + inl_flags + [
              '-Wl,-cache_path_lto,build/xiv/lto-cache', '-Wl,-mllvm,-threads=%d' % (os.cpu_count() or 4)]
-            + objs + thirdparty.libs('sdl3') + GFX_LIBS + ['-lm', '-lpthread'], 'build/xiv/lto-cache', len(gen))
+            + objs + thirdparty.libs('sdl3') + GFX_LIBS + SIGNIN_LIBS + ['-lm', '-lpthread'], 'build/xiv/lto-cache', len(gen))
     xiv_bundle(exe)
     with open(os.path.join(ROOT, 'build', 'xivboot.sha256'), 'w') as f:  # which ffxivgame.exe (xiv_run.py)
         f.write(sha256(exe) + '\n')
@@ -306,6 +311,7 @@ XIV_PLIST = '''<?xml version="1.0" encoding="UTF-8"?>
 	<key>LSApplicationCategoryType</key><string>public.app-category.role-playing-games</string>
 	<key>LSSupportsGameMode</key><true/>
 	<key>NSHighResolutionCapable</key><true/>
+	<key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
 </dict>
 </plist>
 '''
