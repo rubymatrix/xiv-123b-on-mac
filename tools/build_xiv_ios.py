@@ -48,7 +48,7 @@ APP_ID = 'local.xiv123b.anywhere'
 SDL = 'sdl3-ios'
 # M1 is the A14's core: every iPad with an M chip, and iPhone 12 and later
 CPU = '-mcpu=apple-a14'
-FRAMEWORKS = ['Metal', 'QuartzCore', 'Foundation', 'CoreText', 'CoreGraphics']  # CoreText: the touch controls' labels
+FRAMEWORKS = ['Metal', 'QuartzCore', 'Foundation', 'CoreText', 'CoreGraphics', 'UIKit']  # CoreText: the touch controls' labels
 WEAK_FRAMEWORKS = ['MetalFX']  # device builds only: the simulator's SDK has no MetalFX (gfx9_upscale_none.h)
 ENTITLEMENTS = {
     'com.apple.developer.kernel.extended-virtual-addressing': True,
@@ -182,7 +182,7 @@ def runtime_objs(t, without_game=False):
         sources = [s for s in sources if s not in later]
     objs = t.compile(sources, 'runtime', ours)
     objs += t.compile(['tests/xivboot.c'], 'xivboot', ours + ['-Dmain=xivboot_main'])
-    objs += t.compile(['tests/xivboot_ios.c', 'tests/ios_touch.c'], 'entry', ours)
+    objs += t.compile(['tests/xivboot_ios.c', 'tests/ios_touch.c', 'tests/ios_power.m'], 'entry', ours)
     return objs, archive, frameworks
 
 

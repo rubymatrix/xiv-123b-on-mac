@@ -20,25 +20,39 @@
 
 int xivboot_main(int argc, char** argv);
 extern void (*xivboot_main_hook)(void); /* xivboot.c */
+void xivboot_set_fps_cap(int fps);
 void ios_touch_init(void);              /* ios_touch.c */
 void ios_touch_frame(int in_game);
+int ios_power_fps(const char** why);    /* ios_power.m */
 
-/* the touch controls: set up on the main loop's first turn (SDL is up then), laid out and drawn at
- * about 60 Hz (XIV_TOUCH=0: none) */
-static void touch_tick(void)
+static int g_touch_on, g_power_on;
+
+/* Each turn of the main loop (SDL is up by the first): the touch controls set up once, then laid out
+ * and drawn at about 60 Hz (XIV_TOUCH=0: none); the frame cap from the phone's state every 2 s
+ * (ios_power.m; not while XIV_FPSCAP fixes it) */
+static void main_tick(void)
 {
-    static int up;
-    static Uint64 last;
-    if (!up)
-    {
-        up = 1;
-        ios_touch_init();
-    }
+    static int up, cap;
+    static Uint64 last_touch, last_power;
     Uint64 now = SDL_GetTicks();
-    if (now - last >= 16)
+    if (g_touch_on)
     {
-        last = now;
-        ios_touch_frame(1);
+        if (!up)
+            up = 1, ios_touch_init();
+        if (now - last_touch >= 16)
+            last_touch = now, ios_touch_frame(1);
+    }
+    if (g_power_on && (!last_power || now - last_power >= 2000))
+    {
+        last_power = now;
+        const char* why = "";
+        int fps = ios_power_fps(&why);
+        if (fps != cap)
+        {
+            cap = fps;
+            xivboot_set_fps_cap(fps);
+            fprintf(stderr, "[ios] frame cap %d (%s)\n", fps, why);
+        }
     }
 }
 
@@ -140,9 +154,11 @@ int main(int argc, char** argv)
     setenv("XIV_DOCUMENTS", docs, 0);
     setenv("XIV_DISCORD", "0", 0); /* no Discord app to talk to */
     screen_size();
-    if (!getenv("XIV_TOUCH") || strcmp(getenv("XIV_TOUCH"), "0"))
+    g_power_on = !getenv("XIV_FPSCAP");
+    g_touch_on = !getenv("XIV_TOUCH") || strcmp(getenv("XIV_TOUCH"), "0");
+    xivboot_main_hook = main_tick;
+    if (g_touch_on)
     {
-        xivboot_main_hook = touch_tick;
         /* a pad 0 from the start (input.c's, which the touch controls' and a real controller's
          * buttons are added to): the touch controls' own pad comes only once the main loop runs,
          * after the game has looked for its pad, and the game's menus then took no D-pad presses

@@ -199,6 +199,13 @@ extern void (*g9_pace_hook)(uint32_t fps); /* gfx9.h */
 uint64_t g9_pace_refresh_ns(void);
 static void xiv_pace_fps(uint32_t fps) { wr32(0x137DF00, fps); }
 
+/* The frame cap while the game runs (the iOS entry's, from the phone's state): the render loop's
+ * limiter reads it each frame; 0 uncaps */
+void xivboot_set_fps_cap(int fps)
+{
+    wr32(0x137DF00, fps > 0 ? (uint32_t)fps : 100000u);
+}
+
 /* called each turn of the main thread's loop once SDL is up (the iOS entry's touch controls,
  * tests/xivboot_ios.c), on the main thread */
 void (*xivboot_main_hook)(void);
