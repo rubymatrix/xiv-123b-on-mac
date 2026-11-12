@@ -199,6 +199,10 @@ extern void (*g9_pace_hook)(uint32_t fps); /* gfx9.h */
 uint64_t g9_pace_refresh_ns(void);
 static void xiv_pace_fps(uint32_t fps) { wr32(0x137DF00, fps); }
 
+/* called each turn of the main thread's loop once SDL is up (the iOS entry's touch controls,
+ * tests/xivboot_ios.c), on the main thread */
+void (*xivboot_main_hook)(void);
+
 static void quit_signal(int sig, siginfo_t* info, void* ctx)
 {
     char path[1024] = "";
@@ -304,8 +308,8 @@ int main(int argc, char** argv)
     }
 
     /* The frame rate target, 60 (XIV_FPSCAP=<fps>; 0 uncaps): the render loop's limiter
-     * (frame_rate_target in the apply overlay) and the logic loop (worker_tick_period, which also
-     * advances the interface's animations) both run at it. */
+     * (frame_rate_target in the apply overlay). The logic loop (worker_tick_period, which also
+     * advances the interface's animations) runs at XIV_TICKHZ, 30 unless set. */
     {
         const char* cap = getenv("XIV_FPSCAP");
         int fps = cap ? atoi(cap) : 60;
@@ -320,8 +324,11 @@ int main(int argc, char** argv)
             k32_quantize_qpc_at(0xA4FE24, g9_pace_refresh_ns);
         /* a frame that ran over its period: the limiter's Sleep(1) becomes a yield */
         k32_skip_sleep_at(0x4E8F72);
+        /* the logic loop at 30 Hz (XIV_TICKHZ), the game's own: at 60 its menus miss the pad's
+         * presses (a press is a change between two polls, and they read every other one), so only
+         * a held D-pad's repeats moved them. The keyboard's presses are not lost either way. */
         const char* hz = getenv("XIV_TICKHZ");
-        int tick = hz && atoi(hz) > 0 ? atoi(hz) : (fps > 0 ? fps : 120);
+        int tick = hz && atoi(hz) > 0 ? atoi(hz) : 30;
         wr32(0x137DF04, 1000000u / (uint32_t)(tick > 1000 ? 1000 : tick));
         /* and its sleeps paced exactly: the interface's animations advance on this loop */
         k32_pace_sleep_at(0xCC6D4C, 1000000000ull / (uint32_t)(tick > 1000 ? 1000 : tick));
@@ -386,6 +393,8 @@ int main(int argc, char** argv)
     {
         SDL_PumpEvents();
         user32_main_tick();
+        if (xivboot_main_hook)
+            xivboot_main_hook();
         SDL_Delay(1);
     }
     return 0;

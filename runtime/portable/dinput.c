@@ -877,7 +877,15 @@ uint32_t dinput_xinput_get_state(uint32_t user, uint32_t out)
     if (dinput_xpad_hook)
         dinput_xpad_hook(user, &x); /* the addon host: button events, and buttons it keeps from the game */
     if (memcmp(&x, &g_xlast[user], sizeof x))
+    {
+        static int log = -1;
+        if (log < 0)
+            log = getenv("XIV_PADLOG") && strcmp(getenv("XIV_PADLOG"), "0");
+        if (log)
+            rt_log("[pad] %u buttons %04x lt %u rt %u left %d,%d right %d,%d at %llu ms\n", user, x.buttons, x.lt, x.rt,
+                x.lx, x.ly, x.rx, x.ry, (unsigned long long)(rt_monotonic_ns() / 1000000));
         g_xlast[user] = x, g_xpacket[user]++;
+    }
     /* XINPUT_STATE: dwPacketNumber, then XINPUT_GAMEPAD {wButtons, bLeftTrigger, bRightTrigger,
      * sThumbLX, sThumbLY, sThumbRX, sThumbRY} */
     wr32(out, g_xpacket[user]);

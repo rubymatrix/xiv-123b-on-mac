@@ -97,6 +97,14 @@ static Wnd* wnd(uint32_t hwnd)
     return i < MAX_WINDOWS && g_wnds[i].used ? &g_wnds[i] : NULL;
 }
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+/* iOS: the cursor is where the last mouse event the game was given put it (window points), not
+ * SDL's mouse position: SDL moves that to every touch, the touch controls' presses too, and the game
+ * would take each D-pad tap for the mouse moving (its cursor leaves the pad's selection, and the
+ * press goes on taking it back) */
+static float g_evt_x, g_evt_y; /* the top left until the first click */
+#endif
+
 /* The window's points and the client's pixels. Present scales the back buffer (the client's size)
  * into the window with its aspect kept, centred (gfx9_metal.m): a resized Mac window, an iPhone's
  * screen in points. Mouse and touch points come in the window's points and go to the game in the
@@ -692,6 +700,9 @@ static void pump(void)
             if (w)
             {
                 int mx, my;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+                g_evt_x = e.motion.x, g_evt_y = e.motion.y;
+#endif
                 to_client(w, e.motion.x, e.motion.y, &mx, &my);
                 ui_unsqueeze(w, &mx, &my);
                 /* the game's window procedure picks the pointer here: its shape, or none */
@@ -714,6 +725,9 @@ static void pump(void)
             if (!msg)
                 break;
             int bx, by;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+            g_evt_x = e.button.x, g_evt_y = e.button.y;
+#endif
             to_client(w, e.button.x, e.button.y, &bx, &by);
             if (inputlog)
                 rt_log("[input] button %d %s at %.1f,%.1f points of %dx%d -> %d,%d of the client %dx%d (hwnd %x, window at %d,%d)\n",
@@ -1117,6 +1131,7 @@ void user32_main_tick(void)
         /* iOS has no desktop: SDL's "global" position is the one in the window, which is where the game
          * placed it (its own centring, w->x, w->y); made the desktop's as GetCursorPos expects */
         Wnd* fw = wnd(g_focus);
+        x = g_evt_x, y = g_evt_y; /* never SDL's, which follows every touch, until a click there is none */
         if (fw)
             x += (float)fw->x, y += (float)fw->y;
     }
@@ -2117,13 +2132,23 @@ static void sh_DrawTextA(Guest* g) { draw_text(g, 0); }
 static void sh_DrawTextW(Guest* g) { draw_text(g, 1); }
 
 /* --- IMM32: the US client with no IME: a context that is never open ----------------------------------------- */
-static void sh_ImmGetContext(Guest* g) { RET(0x00070001u, 1); }
-static void sh_ImmReleaseContext(Guest* g) { RET(1, 2); }
-static void sh_ImmGetOpenStatus(Guest* g) { RET(0, 1); }
-static void sh_ImmSetOpenStatus(Guest* g) { RET(1, 2); }
-static void sh_ImmNotifyIME(Guest* g) { RET(1, 4); }
-static void sh_ImmSetCandidateWindow(Guest* g) { RET(1, 2); }
-static void sh_ImmSetCompositionWindow(Guest* g) { RET(1, 2); }
+/* XIV_IMELOG=1: each call the game makes, to find where its text fields take and lose the focus
+ * (the place to bring up a phone's keyboard) */
+static int imelog(void)
+{
+    static int on = -1;
+    if (on < 0)
+        on = getenv("XIV_IMELOG") && strcmp(getenv("XIV_IMELOG"), "0");
+    return on;
+}
+#define IMELOG(name, n) do { if (imelog()) rt_log("[ime] %s(%x, %x, %x) from %08x\n", name, n > 0 ? ARG(0) : 0, n > 1 ? ARG(1) : 0, n > 2 ? ARG(2) : 0, rd32(g->esp)); } while (0)
+static void sh_ImmGetContext(Guest* g) { IMELOG("ImmGetContext", 1); RET(0x00070001u, 1); }
+static void sh_ImmReleaseContext(Guest* g) { IMELOG("ImmReleaseContext", 2); RET(1, 2); }
+static void sh_ImmGetOpenStatus(Guest* g) { IMELOG("ImmGetOpenStatus", 1); RET(0, 1); }
+static void sh_ImmSetOpenStatus(Guest* g) { IMELOG("ImmSetOpenStatus", 2); RET(1, 2); }
+static void sh_ImmNotifyIME(Guest* g) { IMELOG("ImmNotifyIME", 3); RET(1, 4); }
+static void sh_ImmSetCandidateWindow(Guest* g) { IMELOG("ImmSetCandidateWindow", 2); RET(1, 2); }
+static void sh_ImmSetCompositionWindow(Guest* g) { IMELOG("ImmSetCompositionWindow", 2); RET(1, 2); }
 static void sh_ImmGetCandidateListA(Guest* g) { RET(0, 4); }
 static void sh_ImmGetCandidateListCountA(Guest* g) { if (ARG(1)) wr32(ARG(1), 0); RET(0, 2); }
 static void sh_ImmGetCompositionStringA(Guest* g) { RET(0, 4); }

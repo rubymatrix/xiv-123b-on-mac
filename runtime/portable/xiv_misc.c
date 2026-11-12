@@ -290,7 +290,12 @@ static void sh_D3DPERF_SetOptions(Guest* g) { RET(0, 1); }
 /* --- imm32: no input method on this host (SDL's text input supplies characters) ---------------- */
 
 static void sh_ImmDisableTextFrameService(Guest* g) { RET(1, 1); }
-static void sh_ImmAssociateContext(Guest* g) { RET(0, 2); }
+static void sh_ImmAssociateContext(Guest* g)
+{
+    if (getenv("XIV_IMELOG") && strcmp(getenv("XIV_IMELOG"), "0"))
+        rt_log("[ime] ImmAssociateContext(%x, %x) from %08x\n", ARG(0), ARG(1), rd32(g->esp));
+    RET(0, 2);
+}
 static void sh_ImmGetCandidateListW(Guest* g) { RET(0, 4); }
 static void sh_ImmGetCompositionStringW(Guest* g) { RET(0, 4); }
 

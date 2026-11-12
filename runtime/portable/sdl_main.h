@@ -54,6 +54,11 @@ static inline bool sdlm_ShowWindow(SDL_Window* w) { sdlm_wb_args a = { w, 0, 0 }
 static inline bool sdlm_HideWindow(SDL_Window* w) { sdlm_wb_args a = { w, 0, 0 }; sdl_main_run(sdlm_hide, &a); return a.r; }
 static inline bool sdlm_RaiseWindow(SDL_Window* w) { sdlm_wb_args a = { w, 0, 0 }; sdl_main_run(sdlm_raise, &a); return a.r; }
 static inline bool sdlm_StartTextInput(SDL_Window* w) { sdlm_wb_args a = { w, 0, 0 }; sdl_main_run(sdlm_text, &a); return a.r; }
+static void sdlm_resizable(void* p) { sdlm_wb_args* a = (sdlm_wb_args*)p; a->r = SDL_SetWindowResizable(a->w, a->b); }
+static inline bool sdlm_SetWindowResizable(SDL_Window* w, bool b) { sdlm_wb_args a = { w, b, 0 }; sdl_main_run(sdlm_resizable, &a); return a.r; }
+typedef struct { SDL_Window* w; float lo, hi; bool r; } sdlm_aspect_args;
+static void sdlm_aspect(void* p) { sdlm_aspect_args* a = (sdlm_aspect_args*)p; a->r = SDL_SetWindowAspectRatio(a->w, a->lo, a->hi); }
+static inline bool sdlm_SetWindowAspectRatio(SDL_Window* w, float lo, float hi) { sdlm_aspect_args a = { w, lo, hi, 0 }; sdl_main_run(sdlm_aspect, &a); return a.r; }
 
 typedef struct { SDL_Window* w; const SDL_DisplayMode* m; bool r; } sdlm_mode_args;
 static void sdlm_mode(void* p) { sdlm_mode_args* a = (sdlm_mode_args*)p; a->r = SDL_SetWindowFullscreenMode(a->w, a->m); }
@@ -103,6 +108,8 @@ static inline bool sdlm_PollEvent(SDL_Event* e)
 #define SDL_SetWindowPosition sdlm_SetWindowPosition
 #define SDL_SetWindowFullscreen sdlm_SetWindowFullscreen
 #define SDL_SetWindowBordered sdlm_SetWindowBordered
+#define SDL_SetWindowResizable sdlm_SetWindowResizable
+#define SDL_SetWindowAspectRatio sdlm_SetWindowAspectRatio
 #define SDL_SyncWindow sdlm_SyncWindow
 #define SDL_ShowWindow sdlm_ShowWindow
 #define SDL_HideWindow sdlm_HideWindow
