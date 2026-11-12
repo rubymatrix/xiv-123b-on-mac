@@ -62,6 +62,24 @@ Things to establish on the Mac:
 - The Mac's internal disk is nearly full, so the patches, the patched game folder and this
   checkout's build/ and generated/ (symlinks) live on an external drive.
 
+## First device run (iPhone 17 Pro, iOS 27.3, 2026-11-11)
+
+- Built with `XIV_IOS_GUEST_BASE=none` and signed with the team's wildcard development profile, so
+  without the extended addressing and increased memory entitlements. iOS placed the 4 GB guest
+  window at 0x7000000000. The fixed 2 TB base of the Mac build would not have worked; a fixed base
+  near 0x7000000000 is the next thing to try for speed.
+- Metal on the A19 Pro: title, character list and the world at a steady 60 fps at 1560x720, 40 to
+  50 fps while a zone streams in. The game reached the world and its opening cutscene against prod.
+- Memory on the Mac: 656 MB at the character list, 1,294 MB at most in the world (not yet measured
+  in a busy area, nor on the phone).
+- Three iOS bugs found and fixed: file names (the phone's storage is case-sensitive, so the
+  runtime now matches names ignoring case), touch (SDL's global mouse position on iOS is the
+  window's), and the interface size (the game draws it at a fixed pixel size, so it now renders at
+  720 lines and is scaled up to the screen).
+- The patched game folder goes onto the phone with `xcrun devicectl device copy to` into the app's
+  data container (12 GB, about 8 minutes over USB). A 64 GB iPad without room for it needs a game
+  folder on an external drive, chosen with a folder picker. Not written yet.
+
 ## What xi-on-anything already has for iOS (read in its source)
 
 - `tools/build_ios.py` builds an .app with Xcode's clang for `arm64-apple-ios17.0`, for the
