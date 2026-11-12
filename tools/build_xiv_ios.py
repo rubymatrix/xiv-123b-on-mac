@@ -237,7 +237,8 @@ def info_plist(t):
 
 def app_icon(t, bundle, exe):
     """The Mac app's icon (ffxivboot.exe's, else ffxivgame.exe's: build_xiv.exe_icns, from the
-    player's files at build time) as the app's: tools/ios_icon.m makes it a 1024x1024 opaque PNG,
+    player's files at build time), its illustration without the logo, as the app's: tools/ios_icon.m
+    makes it a 1024x1024 opaque PNG,
     actool compiles it into the bundle. Returns the Info.plist keys that name it; {} without one."""
     folder = os.path.dirname(exe)
     source = next((p for p in (os.path.join(folder, 'ffxivboot.exe'), exe) if os.path.exists(p)), None)
@@ -255,7 +256,8 @@ def app_icon(t, bundle, exe):
     icon = os.path.join(cat, 'AppIcon.appiconset')
     shutil.rmtree(cat, ignore_errors=True)
     os.makedirs(icon)
-    run([tool, icns, os.path.join(icon, 'icon.png')])
+    # the illustration alone (XIV_IOS_ICON=tile: the Mac's whole tile, logo and frame)
+    run([tool, icns, os.path.join(icon, 'icon.png')] + ([] if os.environ.get('XIV_IOS_ICON') == 'tile' else ['--art']))
     with open(os.path.join(icon, 'Contents.json'), 'w') as f:
         json.dump({'images': [{'filename': 'icon.png', 'idiom': 'universal', 'platform': 'ios', 'size': '1024x1024'}],
                    'info': {'author': 'xcode', 'version': 1}}, f)

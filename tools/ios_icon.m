@@ -2,18 +2,27 @@
  * from the player's ffxivboot.exe) cropped to what is not transparent, drawn on opaque white at
  * INSET of the 1024x1024 PNG an asset catalog takes, centred. iOS masks the icon to its own rounded
  * shape (cutting the tile's frame if it reached the edge) and would fill transparent corners black.
- *   ios_icon <picture> <out.png> */
+ * With --art: the illustration alone, without the logo under it (a square of the 256-pixel tile, ART_*
+ * as fractions of the picture), filling the icon; it sits on white, so iOS's mask only cuts white.
+ *   ios_icon <picture> <out.png> [--art] */
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 #import <ImageIO/ImageIO.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+/* the illustration in the tile, clear of its frame and the logo: x, y, side as fractions of the tile */
+#define ART_X (46.0 / 256)
+#define ART_Y (14.0 / 256)
+#define ART_SIDE (164.0 / 256)
 
 int main(int argc, char** argv)
 {
-    if (argc != 3)
+    int art = argc == 4 && !strcmp(argv[3], "--art");
+    if (argc != 3 && !art)
     {
-        fprintf(stderr, "usage: ios_icon <picture> <out.png>\n");
+        fprintf(stderr, "usage: ios_icon <picture> <out.png> [--art]\n");
         return 2;
     }
     @autoreleasepool
@@ -57,14 +66,16 @@ int main(int argc, char** argv)
         if (x1 < x0)
             x0 = 0, y0 = 0, x1 = w - 1, y1 = h - 1;
         /* bitmap rows run top down, CGImage crops too */
-        CGImageRef crop = CGImageCreateWithImageInRect(im, CGRectMake(x0, y0, x1 - x0 + 1, y1 - y0 + 1));
+        CGRect box = art ? CGRectMake(floor(w * ART_X), floor(h * ART_Y), floor(w * ART_SIDE), floor(w * ART_SIDE))
+                         : CGRectMake(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+        CGImageRef crop = CGImageCreateWithImageInRect(im, box);
         const size_t N = 1024;
         const double INSET = 0.84; /* the tile's share of the icon: its frame clear of iOS's mask */
         CGContextRef out = CGBitmapContextCreate(NULL, N, N, 8, N * 4, rgb, (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
         CGContextSetRGBFillColor(out, 1, 1, 1, 1);
         CGContextFillRect(out, CGRectMake(0, 0, N, N));
         CGContextSetInterpolationQuality(out, kCGInterpolationHigh);
-        double side = N * INSET, at = (N - side) * 0.5;
+        double side = art ? N : N * INSET, at = (N - side) * 0.5;
         CGContextDrawImage(out, CGRectMake(at, at, side, side), crop);
         CGImageRef done = CGBitmapContextCreateImage(out);
         NSURL* to = [NSURL fileURLWithPath:@(argv[2])];
