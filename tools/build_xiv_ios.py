@@ -258,7 +258,10 @@ def app(t, a):
                                              check=True).stdout)
         allowed = prof.get('Entitlements', {})
         ent = dict(ENTITLEMENTS)
-        ent['application-identifier'] = allowed['application-identifier']
+        app_id = allowed['application-identifier']
+        if app_id.endswith('*'):  # a wildcard profile: the team's prefix and this app's id
+            app_id = app_id[:-1] + t.bundle_id
+        ent['application-identifier'] = app_id
         ent['com.apple.developer.team-identifier'] = allowed['com.apple.developer.team-identifier']
         if allowed.get('get-task-allow'):
             ent['get-task-allow'] = True
@@ -275,22 +278,30 @@ def app(t, a):
 
 
 def find_profile(bundle_id):
-    """an unexpired provisioning profile Xcode made for bundle_id, newest first"""
+    """an unexpired iOS provisioning profile for bundle_id, newest first: one made for it, else a
+    team's wildcard (which grants none of ENTITLEMENTS: those need an App ID of their own)"""
     import datetime
     found = []
     for d in ('~/Library/Developer/Xcode/UserData/Provisioning Profiles', '~/Library/MobileDevice/Provisioning Profiles'):
         d = os.path.expanduser(d)
         for f in os.listdir(d) if os.path.isdir(d) else []:
+            if not f.endswith('.mobileprovision'):  # .provisionprofile: the Mac's
+                continue
             path = os.path.join(d, f)
-            r = subprocess.run(['security', 'cms', '-D', '-i', path], capture_output=True)
+            r = subprocess.run(['security', 'cms', '-D', '-i', path], capture_output=True, timeout=30)
             if r.returncode:
                 continue
             prof = plistlib.loads(r.stdout)
             app_id = prof.get('Entitlements', {}).get('application-identifier', '')
             expires = prof.get('ExpirationDate')
-            if app_id.split('.', 1)[-1] == bundle_id and expires and expires > datetime.datetime.now():
-                found.append((expires, path))
-    return max(found)[1] if found else None
+            name = app_id.split('.', 1)[-1]
+            if not expires or expires <= datetime.datetime.now():
+                continue
+            if name == bundle_id:
+                found.append((1, expires, path))
+            elif name == '*':
+                found.append((0, expires, path))
+    return max(found)[2] if found else None
 
 
 def find_identity():

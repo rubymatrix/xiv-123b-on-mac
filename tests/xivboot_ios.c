@@ -55,25 +55,25 @@ static int read_args(const char* path, char** out, int room)
     return n;
 }
 
-/* the screen in pixels, landscape, for the first config.sys (the game's window is the screen) */
+/* The first config.sys's size: 720 lines (the least the game takes, so its interface is as large as
+ * it gets; the game draws it at a fixed pixel size) at the screen's shape, scaled up to the screen
+ * when presented. A phone's screen at its own resolution makes the text unreadably small.
+ * XIV_CONFIG_SIZE=<w>x<h> in run.args chooses another. */
 static void screen_size(void)
 {
     if (getenv("XIV_CONFIG_SIZE") || !SDL_InitSubSystem(SDL_INIT_VIDEO))
         return;
     const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
-    if (m)
+    if (m && m->w > 0 && m->h > 0)
     {
-        int w = (int)(m->w * m->pixel_density), h = (int)(m->h * m->pixel_density);
-        if (w < h)
-        {
-            int t = w;
-            w = h;
-            h = t;
-        }
+        int w = m->w > m->h ? m->w : m->h, h = m->w > m->h ? m->h : m->w; /* landscape */
+        int cw = (720 * w / h + 4) & ~7;
+        if (cw < 1024)
+            cw = 1024;
         char size[32];
-        snprintf(size, sizeof size, "%dx%d", w, h);
+        snprintf(size, sizeof size, "%dx%d", cw, 720);
         setenv("XIV_CONFIG_SIZE", size, 0);
-        fprintf(stderr, "[ios] screen %s\n", size);
+        fprintf(stderr, "[ios] screen %dx%d points x%.0f: the game at %s\n", w, h, m->pixel_density, size);
     }
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }

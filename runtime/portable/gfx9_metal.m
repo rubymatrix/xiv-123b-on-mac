@@ -202,7 +202,7 @@ static uint32_t g_ring_used, g_frame;
 static id<MTLBuffer> g_default_attr; /* (0, 0, 0, 1): what an attribute no stream supplies reads */
 static id<MTLLibrary> g_util;
 static id<MTLRenderPipelineState> g_present_pipe;
-static id<MTLRenderPipelineState> g_text_pipe; /* the FPS counter (XIV_FPS=0 hides it) */
+static id<MTLRenderPipelineState> g_text_pipe; /* the FPS counter (XIV_FPS=1 shows it) */
 static id<MTLSamplerState> g_linear, g_point;
 
 /* the targets */
@@ -474,8 +474,8 @@ int g9_init(void* sdl_window, int vsync)
         pd.fragmentFunction = [[g_util newFunctionWithName:@"util_copy"] autorelease];
         pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_present_pipe = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
-        const char* fps = getenv("XIV_FPS");
-        if (!fps || strcmp(fps, "0"))
+        const char* fps = getenv("XIV_FPS"); /* the FPS counter: XIV_FPS=1 shows it */
+        if (fps && strcmp(fps, "0"))
         {
             pd.fragmentFunction = [[g_util newFunctionWithName:@"util_text"] autorelease];
             pd.colorAttachments[0].blendingEnabled = YES;
