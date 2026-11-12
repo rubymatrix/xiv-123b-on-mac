@@ -182,7 +182,11 @@ static int ipc_open(void)
             if (fd < 0)
                 return 0;
             int one = 1;
+#ifdef SO_NOSIGPIPE
             setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#else
+            (void)one; /* Linux, Android: MSG_NOSIGNAL on each send (ipc_write) */
+#endif
             if (connect(fd, (struct sockaddr*)&sa, sizeof sa) == 0)
             {
                 fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
@@ -200,7 +204,11 @@ static int ipc_write(const void* p, uint32_t n)
     int spins = 0;
     while (n)
     {
+#ifdef MSG_NOSIGNAL
+        ssize_t w = send(g_fd, c, n, MSG_NOSIGNAL);
+#else
         ssize_t w = send(g_fd, c, n, 0);
+#endif
         if (w > 0)
             c += w, n -= (uint32_t)w;
         else if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && ++spins < 1000)

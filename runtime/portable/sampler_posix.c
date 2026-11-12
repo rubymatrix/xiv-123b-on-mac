@@ -10,11 +10,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
-#include <sys/ucontext.h>
 #include <fcntl.h>
 #include <unistd.h>
 
 #include "runtime.h"
+
+#if !defined(__APPLE__)
+/* the samples read Darwin's register layout (__darwin_ucontext): macOS only for now */
+void sampler_start(void) {}
+#else
+#include <sys/ucontext.h>
 
 typedef struct { uint64_t pc, lr; uint32_t tid, ms; uint64_t fr[6]; } Sample; /* ms: since sampling began */ /* fr: return addresses up the frame chain */
 
@@ -92,3 +97,4 @@ void sampler_start(void)
     extern int main(int, char**);
     rt_log("[sample] profiling to %s; main at %p\n", path, (void*)main);
 }
+#endif

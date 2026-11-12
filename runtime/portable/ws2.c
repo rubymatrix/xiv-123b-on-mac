@@ -988,7 +988,9 @@ static void watcher(void* arg)
     for (;;)
     {
         fd_set rd, wr, ex;
-        FD_ZERO(&rd), FD_ZERO(&wr), FD_ZERO(&ex);
+        FD_ZERO(&rd); /* statements: bionic's FD_ZERO is a do-while */
+        FD_ZERO(&wr);
+        FD_ZERO(&ex);
         host_sock maxfd = 0;
         int any = 0;
         lock();
