@@ -19,7 +19,10 @@
 #include <stdlib.h>
 #include <unistd.h>
 #if defined(__APPLE__)
-#include <libproc.h>
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+#include <libproc.h> /* not in the iOS SDK */
 #endif
 #include <string.h>
 
@@ -35,15 +38,20 @@
 
 void app_icon_from_image(uint32_t base); /* app_icon.m */
 
+/* XIV_CONFIG_SIZE=<w>x<h>: the first config.sys's window size instead of 2112x1188 (the iOS entry
+ * sets it from the screen, tests/xivboot_ios.c) */
 static void write_config_sys(const char* path)
 {
-    static const uint32_t fields[24] = {
+    uint32_t fields[24] = {
         0x20120419, /* magic */
         0, 0xD800, 0,
         0,          /* display mode: windowed */
         2112, 1188, /* window size */
         7, 4, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 1,
     };
+    unsigned w = 0, h = 0;
+    if (getenv("XIV_CONFIG_SIZE") && sscanf(getenv("XIV_CONFIG_SIZE"), "%ux%u", &w, &h) == 2 && w >= 640 && h >= 360)
+        fields[5] = w, fields[6] = h;
     uint8_t buf[0x2AC] = { 0 };
     for (int i = 0; i < 24; i++)
         for (int b = 0; b < 4; b++)
@@ -56,13 +64,38 @@ static void write_config_sys(const char* path)
     {
         fwrite(buf, 1, sizeof buf, f);
         fclose(f);
-        printf("config.sys: wrote the defaults (2112x1188 window) to %s\n", path);
+        printf("config.sys: wrote the defaults (%ux%u window) to %s\n", (unsigned)fields[5], (unsigned)fields[6], path);
     }
+}
+
+/* The first window size when nothing sets XIV_CONFIG_SIZE: the largest 16:9 size, in points (the
+ * window is made in points), within nine tenths of the main display's usable area, so it fits
+ * beside the menu bar and the Dock. 2112x1188 when the display cannot be read. */
+static void fit_config_size(void)
+{
+    if (getenv("XIV_CONFIG_SIZE") || !SDL_InitSubSystem(SDL_INIT_VIDEO))
+        return;
+    SDL_Rect r;
+    if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &r) && r.w > 0 && r.h > 0)
+    {
+        int w = r.w * 9 / 10, h = r.h * 9 / 10;
+        if (w * 9 > h * 16)
+            w = h * 16 / 9;
+        w &= ~7;
+        h = w * 9 / 16;
+        if (w >= 640 && h >= 360) /* the smallest worth playing at */
+        {
+            char size[32];
+            snprintf(size, sizeof size, "%dx%d", w, h);
+            setenv("XIV_CONFIG_SIZE", size, 0);
+        }
+    }
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 
 /* With no config.sys (what ffxivconfig.exe writes) the game opens a 1280x720 window. The first
  * start here writes one instead: the game's own defaults (FUN_00405c90, decomp/docs/config_sys.md)
- * but a 2112x1188 window, 1920x1080 and a tenth. Edit it with tools/xiv_config.py. */
+ * but a window sized for the main display (fit_config_size). Edit it with tools/xiv_config.py. */
 static void write_default_config(const char* docs)
 {
     char path[1100];
@@ -75,7 +108,10 @@ static void write_default_config(const char* docs)
     if (f)
         fclose(f);
     else
+    {
+        fit_config_size();
         write_config_sys(path);
+    }
 
     /* config.pad: the gamepad ffxivconfig.exe picked. With none the game opens no gamepad at all
      * (FUN_00d33630 matches each DirectInput device's instance and product GUID against it), so
@@ -166,7 +202,7 @@ static void xiv_pace_fps(uint32_t fps) { wr32(0x137DF00, fps); }
 static void quit_signal(int sig, siginfo_t* info, void* ctx)
 {
     char path[1024] = "";
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
     proc_pidpath(info->si_pid, path, sizeof path);
 #endif
     char line[1200];
