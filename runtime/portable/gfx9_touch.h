@@ -206,7 +206,7 @@ static void draw_touch(id<MTLRenderCommandEncoder> e, NSUInteger w, NSUInteger h
         u.rect[2] = 2 * hw / 0.86f, u.rect[3] = 2 * hh / 0.86f;
         u.kind = t->kind == GFX_TOUCH_PILL ? 2u : t->kind == GFX_TOUCH_RING ? 3u : t->kind == GFX_TOUCH_KNOB ? 4u
                : t->kind == GFX_TOUCH_BACK ? 0u : 1u;
-        u.sym = (uint32_t)t->sym, u.pressed = t->pressed != 0, u.alpha = t->alpha;
+        u.sym = (uint32_t)t->sym, u.pressed = (uint32_t)t->pressed, u.alpha = t->alpha; /* bit 0 held, bit 1 high contrast */
         int cell = t->label[0] && !t->sym ? label_cell(t->label) : -1;
         if (cell >= 0)
         {
