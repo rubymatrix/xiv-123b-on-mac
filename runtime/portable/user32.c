@@ -2132,6 +2132,27 @@ static void sh_DrawTextA(Guest* g) { draw_text(g, 0); }
 static void sh_DrawTextW(Guest* g) { draw_text(g, 1); }
 
 /* --- IMM32: the US client with no IME: a context that is never open ----------------------------------------- */
+/* A text field of the game's took or lost the keyboard (xiv_misc.c: ImmAssociateContext with a
+ * context, or with none). On iOS the screen keyboard comes up for it and goes away after; on the Mac
+ * text input stays on, as it always was. */
+void user32_text_field(uint32_t hwnd, int on)
+{
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    static int was = -1;
+    Wnd* w = wnd(hwnd);
+    if (!w || !w->sdl || on == was)
+        return;
+    was = on;
+    if (on)
+        SDL_StartTextInput(w->sdl);
+    else
+        SDL_StopTextInput(w->sdl);
+    rt_log("[ime] text field %s: the screen keyboard %s\n", on ? "focused" : "left", on ? "shown" : "hidden");
+#else
+    (void)hwnd, (void)on;
+#endif
+}
+
 /* XIV_IMELOG=1: each call the game makes, to find where its text fields take and lose the focus
  * (the place to bring up a phone's keyboard) */
 static int imelog(void)
