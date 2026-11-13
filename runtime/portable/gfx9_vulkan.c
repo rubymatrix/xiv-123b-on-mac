@@ -82,7 +82,8 @@ static uint64_t now_ns(void)
 #define VKF_GLOBAL(X) X(vkCreateInstance) X(vkEnumerateInstanceExtensionProperties) X(vkEnumerateInstanceLayerProperties)
 #define VKF_INSTANCE(X)                                                                                          \
     X(vkDestroyInstance) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties)                          \
-    X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceFeatures) X(vkGetPhysicalDeviceQueueFamilyProperties) \
+    X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceFeatures) X(vkGetPhysicalDeviceFeatures2)           \
+    X(vkGetPhysicalDeviceQueueFamilyProperties)                                                                  \
     X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceFormatProperties)                                \
     X(vkEnumerateDeviceExtensionProperties) X(vkCreateDevice) X(vkGetDeviceProcAddr)                             \
     X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR)                         \
@@ -259,12 +260,31 @@ static int format_listed(uint32_t f, int use)
 static VkInstance g_inst;
 static VkDevice g_dev;
 static VkQueue g_queue;
+/* The queue and swapchain are used from the render thread and the present thread: g_qlock around
+ * every submit, acquire, present and device wait. The present thread (Android by default,
+ * XIV_VK_PRESENT_THREAD=0/1): Mali's vkQueuePresentKHR returns only once the GPU has finished the
+ * frame, which kept the next frame from being recorded while the GPU drew this one. */
+static pthread_mutex_t g_qlock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_pmx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_pcond = PTHREAD_COND_INITIALIZER;
+static int g_pthread = -1, g_ppending, g_pbusy;
+static volatile int g_pstale; /* the present thread saw the swapchain out of date */
+static uint32_t g_pimg;
+static VkSemaphore g_psem;
+static VkSwapchainKHR g_pswap;
 static uint32_t g_qfam;
 static VkSurfaceKHR g_surface;
 static VkPhysicalDeviceProperties g_props;
 static VkPhysicalDeviceFeatures g_feat; /* what was enabled */
 static VkPhysicalDeviceMemoryProperties g_memprops;
 static int g_mirror_once, g_float_controls, g_format_list, g_portability;
+/* Render targets no larger than XIV_VK_NOCOMP (default 128, 0 none) made without the driver's
+ * framebuffer compression (Mali's AFBC) where the device has VK_EXT_image_compression_control; with
+ * XIV_VK_NOCOMP set and no control, as storage images, which Mali does not compress. The game's many
+ * small mip chain passes otherwise pay for the compression each pass. */
+static uint32_t g_nocomp;
+static int g_comp_ctl;
+static uint32_t g_nocomp_made;
 static uint32_t g_ubo_align = 256, g_stride_align = 1;
 static void* g_sdl_window;
 static int g_vsync;
@@ -492,7 +512,24 @@ struct G9Tex
     Fmt f;
     VkImageAspectFlags aspect;
     VkImageLayout rest;
+    /* the passes that last wrote each level (as an attachment) and last sampled it, for syncing only
+     * where a pass depends on another (begin_pass) */
+    uint32_t wpass[16], wmax, rpass;
+    /* the image's size where it is not the game's (w, h): the scene's targets at the render scale
+     * (gfx9_scale_vk.h); scene: one of them */
+    uint32_t rw, rh;
+    int scene;
 };
+
+/* gfx9_scale_vk.h, the render scale (included after the passes) */
+static int up_timed(void);
+static void up_gpu_time(double ns);
+static void up_note_stretch(G9Tex* src, G9Tex* dst);
+static G9Tex* up_stand_in(G9Tex* t);
+static int rect_to_image(const G9Tex* t, int32_t r[4]);
+static G9Tex* up_full_copy(G9Tex* t);
+static void up_hook(const G9Draw* d);
+static void up_frame_end(G9Tex* bb);
 
 struct G9Buf
 {
@@ -764,14 +801,16 @@ static VkCommandBuffer cmd(void)
         uint64_t t0 = g_prof ? now_ns() : 0;
         vkWaitForFences(g_dev, 1, &f->fence, VK_TRUE, UINT64_MAX);
         if (g_prof)
-        {
             g_t_fence += now_ns() - t0;
+        if (f->qp)
+        {
             static uint64_t ts[2 + 2 * PROF_PASSES];
             uint32_t nq = 2 + 2 * f->npass;
             if (f->qp_used && vkGetQueryPoolResults(g_dev, f->qp, 0, nq, nq * 8, ts, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
             {
                 double per = g_props.limits.timestampPeriod;
                 g_t_gpu += (uint64_t)((ts[1] - ts[0]) * per), g_n_gpu++;
+                up_gpu_time((ts[1] - ts[0]) * per);
                 for (uint32_t i = 0; i < f->npass; ++i)
                     prof_pass(f->pass_key[i], f->pass_draws[i], (ts[3 + 2 * i] - ts[2 + 2 * i]) * per);
             }
@@ -788,7 +827,7 @@ static VkCommandBuffer cmd(void)
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(f->cb, &bi);
         g_cb = f->cb;
-        if (g_prof && f->qp)
+        if (f->qp)
         {
             vkCmdResetQueryPool(f->cb, f->qp, 0, 2 + 2 * PROF_PASSES);
             vkCmdWriteTimestamp(f->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, f->qp, 0);
@@ -844,7 +883,9 @@ static void submit(int wait, VkSemaphore wait_sem, VkSemaphore signal_sem)
     if (signal_sem)
         si.signalSemaphoreCount = 1, si.pSignalSemaphores = &signal_sem;
     uint64_t t0 = g_prof ? now_ns() : 0;
+    pthread_mutex_lock(&g_qlock);
     VkResult r = vkQueueSubmit(g_queue, 1, &si, f->fence);
+    pthread_mutex_unlock(&g_qlock);
     if (r != VK_SUCCESS)
         rt_log("[gfx9] vkQueueSubmit: %d\n", r);
     if (wait)
@@ -915,6 +956,8 @@ static void barrier_full(void)
         0, NULL);
 }
 
+static uint32_t g_pass_serial, g_synced; /* the passes begun, and the last that all after it may rely on (RPKey) */
+
 static void barrier_image(G9Tex* t, VkImageLayout from, VkImageLayout to, uint32_t level, uint32_t nlevels, uint32_t layer,
     uint32_t nlayers)
 {
@@ -929,6 +972,8 @@ static void barrier_image(G9Tex* t, VkImageLayout from, VkImageLayout to, uint32
     g_n_barriers++;
     vkCmdPipelineBarrier(g_cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL,
         1, &b);
+    if (!g_in_pass)
+        g_synced = g_pass_serial; /* everything before it is finished for what comes after */
 }
 
 /* A new image into its resting layout, outside a render pass: render targets and depth buffers
@@ -1006,6 +1051,10 @@ static VkImageView view_new(G9Tex* t, VkFormat f, VkImageViewType vt, VkImageAsp
     return v;
 }
 
+static int tex_image(G9Tex* t);
+static void up_track(G9Tex* t);
+static void up_forget(G9Tex* t);
+
 G9Tex* g9_tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t d, uint32_t levels, int use)
 {
     if (!g_dev)
@@ -1022,10 +1071,27 @@ G9Tex* g9_tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t d,
     t->aspect = t->f.depth ? (VK_IMAGE_ASPECT_DEPTH_BIT | (t->f.stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0)) : VK_IMAGE_ASPECT_COLOR_BIT;
     t->rest = t->f.depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     t->nolinear = !(ff & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+    t->rw = t->w, t->rh = t->h;
+    up_track(t);
+    if (!tex_image(t))
+    {
+        up_forget(t);
+        free(t);
+        return NULL;
+    }
+    return t;
+}
+
+/* t's image, memory and sampled view, at rw x rh */
+static int tex_image(G9Tex* t)
+{
+    int type = t->type, use = t->use;
+    uint32_t fmt = t->fmt;
+    VkFormatFeatureFlags ff = fmt_features(t->f.vf);
     VkImageCreateInfo ii = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     ii.imageType = type == G9_TEX_3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     ii.format = t->f.vf;
-    ii.extent = (VkExtent3D){ t->w, type == G9_TEX_CUBE ? t->w : t->h, type == G9_TEX_3D ? t->d : 1 };
+    ii.extent = (VkExtent3D){ t->rw, type == G9_TEX_CUBE ? t->rw : t->rh, type == G9_TEX_3D ? t->d : 1 };
     ii.mipLevels = t->levels;
     ii.arrayLayers = t->layers;
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1053,27 +1119,43 @@ G9Tex* g9_tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t d,
             ii.pNext = &fl;
         }
     }
+    VkImageCompressionControlEXT cc = { VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_CONTROL_EXT };
+    if (g_nocomp && use == G9_USE_RT && (t->w > t->h ? t->w : t->h) <= g_nocomp)
+    {
+        if (g_comp_ctl)
+        {
+            cc.flags = VK_IMAGE_COMPRESSION_DISABLED_EXT;
+            cc.pNext = (void*)ii.pNext;
+            ii.pNext = &cc;
+            g_nocomp_made++;
+        }
+        else if (!t->f.depth && (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && getenv("XIV_VK_NOCOMP"))
+        {
+            ii.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+            g_nocomp_made++;
+        }
+        if (g_nocomp_made && !(g_nocomp_made & (g_nocomp_made - 1)))
+            rt_log("[gfx9] %u render targets made uncompressed (%s)\n", g_nocomp_made, g_comp_ctl ? "compression control" : "storage");
+    }
     ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (vkCreateImage(g_dev, &ii, NULL, &t->img) != VK_SUCCESS)
     {
-        rt_log("[gfx9] cannot make a %ux%ux%u texture of format %08x\n", t->w, t->h, t->d, fmt);
-        free(t);
-        return NULL;
+        rt_log("[gfx9] cannot make a %ux%ux%u texture of format %08x\n", t->rw, t->rh, t->d, fmt);
+        return 0;
     }
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(g_dev, t->img, &req);
     if (!mem_alloc(&req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, &t->mem))
     {
         vkDestroyImage(g_dev, t->img, NULL);
-        free(t);
-        return NULL;
+        return 0;
     }
     vkBindImageMemory(g_dev, t->img, t->mem.b->mem, t->mem.off);
     if (ii.usage & VK_IMAGE_USAGE_SAMPLED_BIT)
         t->view = view_new(t, t->f.vf,
             type == G9_TEX_CUBE ? VK_IMAGE_VIEW_TYPE_CUBE : type == G9_TEX_3D ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D,
             t->f.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 0, t->levels, 0, t->layers, !t->f.depth);
-    return t;
+    return 1;
 }
 
 static void tex_free(G9Tex* t)
@@ -1105,6 +1187,7 @@ void g9_tex_destroy(G9Tex* t)
             g_rt[i] = NULL, g_targets_changed = 1;
     if (g_ds == t)
         g_ds = NULL, g_targets_changed = 1;
+    up_forget(t);
     pending_add((Trash){ 0, t, 0, { 0 } });
 }
 
@@ -1305,6 +1388,16 @@ void g9_tex_read(G9Tex* t, uint32_t face, uint32_t level, void* dst, uint32_t pi
 {
     if (!t || level >= t->levels || t->f.depth || t->f.decode)
         return;
+    if (t->rw != t->w || t->rh != t->h)
+    {
+        G9Tex* full = up_full_copy(t);
+        if (full)
+        {
+            g9_tex_read(full, 0, 0, dst, pitch);
+            g9_tex_destroy(full);
+        }
+        return;
+    }
     uint32_t w, h, d;
     level_dims(t, level, &w, &h, &d);
     uint32_t row = t->f.block ? ((w + 3) / 4) * t->f.block : w * t->f.vtexel;
@@ -1916,8 +2009,23 @@ static VkSampler sampler(const G9Sampler* s, int compare_mode, int nolinear)
 typedef struct RPKey
 {
     uint32_t color[G9_MAX_RT], depth;
-    uint8_t ncolor, cload, dload, sload, present, pad[3];
+    uint8_t ncolor, cload, dload, sload, present, nodstore, sync, pad;
 } RPKey;
+
+/* Passes are numbered as they begin. Everything up to g_synced is finished for what comes after
+ * (a pass that waited for all before it, or a full barrier). A pass waits for the GPU's earlier work
+ * only when it touches what a pass after g_synced wrote or sampled; else it overlaps them. On a tiler
+ * (Mali) a wait between every pass made each of the game's ~40 small passes a frame (its 128x128 mip
+ * chains, the bloom) cost about a millisecond. XIV_VK_SYNCALL=1: every pass waits, as before. */
+static int g_need_sync, g_syncall = -1;
+
+/* XIV_VK_EXPERIMENT=<seconds>: that long after the first frame, a mode every 300 frames in turn, for finding what a
+ * GPU is short of in the scene's draws (depth-tested, into a pass with depth; the picture is wrong in all but 0):
+ * 0 as normal, 1 scissored to one pixel (vertices and tiling only), 2 not drawn (the passes and the draws'
+ * binding only), 3 every texture the 1x1 dummy */
+static int g_exp_mode;
+/* XIV_VK_PASSLOG=<frame>: that frame's passes and what their draws sample, to the log */
+static int g_passlog;
 
 /* a render pass: the colour slots up to the last bound (unbound slots unused), then depth. Images
  * come in and go out in their resting layouts; the dependencies order the pass after everything
@@ -1961,36 +2069,35 @@ static VkRenderPass render_pass(const RPKey* k)
         a.format = (VkFormat)k->depth;
         a.samples = VK_SAMPLE_COUNT_1_BIT;
         a.loadOp = k->dload ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-        a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        a.storeOp = k->nodstore ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
         a.stencilLoadOp = !st ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : k->sload ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-        a.stencilStoreOp = st ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        a.stencilStoreOp = st && !k->nodstore ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
         a.initialLayout = a.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
         dref = (VkAttachmentReference){ n, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
         at[n++] = a;
         sp.pDepthStencilAttachment = &dref;
     }
-    /* the passes before this one wrote attachments this one samples or loads, or sampled what this one
-     * writes; transfers have barriers of their own. Fragment work only, so the next pass's vertex work can
-     * start early (all graphics stages here cost MoltenVK 3 ms a frame in a town); a vertex shader's
-     * texture written by the pass just before would want VERTEX_SHADER added */
-    VkSubpassDependency dep[2] = { { 0 } };
+    /* A synced pass (k->sync, or presenting) waits for all the GPU's earlier work: the passes before
+     * it wrote attachments it samples or loads, or sampled what it writes. Its own writes are left to
+     * the next synced pass to wait for. Every graphics stage in the first scope, so that it also chains
+     * after the layout changes that end an unsynced pass (whose implicit dependency ends at the bottom
+     * of the pipe). An unsynced pass has only Vulkan's implicit dependencies: it waits for nothing. */
+    VkSubpassDependency dep[1] = { { 0 } };
     const VkPipelineStageFlags frag = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
                                       VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     const VkAccessFlags writes = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     const VkAccessFlags uses = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
                                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     dep[0].srcSubpass = VK_SUBPASS_EXTERNAL, dep[0].dstSubpass = 0;
-    dep[0].srcStageMask = frag, dep[0].dstStageMask = frag;
+    dep[0].srcStageMask = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+    dep[0].dstStageMask = frag | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
     dep[0].srcAccessMask = writes, dep[0].dstAccessMask = uses;
-    dep[1].srcSubpass = 0, dep[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-    dep[1].srcStageMask = frag, dep[1].dstStageMask = frag;
-    dep[1].srcAccessMask = writes, dep[1].dstAccessMask = uses;
     VkRenderPassCreateInfo ci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
     ci.attachmentCount = n;
     ci.pAttachments = at;
     ci.subpassCount = 1;
     ci.pSubpasses = &sp;
-    ci.dependencyCount = 2;
+    ci.dependencyCount = k->sync || k->present ? 1 : 0;
     ci.pDependencies = dep;
     if (vkCreateRenderPass(g_dev, &ci, NULL, &rp) != VK_SUCCESS)
     {
@@ -2094,6 +2201,23 @@ void g9_set_targets(G9Tex* const color[G9_MAX_RT], const uint8_t face[G9_MAX_RT]
     g_pending_clear = 0;
 }
 
+/* a level's size in the image: the game's, but for the scene's targets at the render scale (one level) */
+static void real_dims(const G9Tex* t, uint32_t level, uint32_t* w, uint32_t* h, uint32_t* d)
+{
+    level_dims(t, level, w, h, d);
+    if (t->rw != t->w || t->rh != t->h)
+        *w = t->rw, *h = t->rh;
+}
+
+/* the bound targets' image pixels per game pixel (1 but for the scene's targets at the render scale) */
+static void target_scale(float* sx, float* sy)
+{
+    const G9Tex* t = g_rt[0] ? g_rt[0] : g_ds;
+    *sx = *sy = 1.0f;
+    if (t && (t->rw != t->w || t->rh != t->h))
+        *sx = (float)t->rw / (float)t->w, *sy = (float)t->rh / (float)t->h;
+}
+
 static void target_size(uint32_t* w, uint32_t* h)
 {
     for (int i = 0; i < G9_MAX_RT; ++i)
@@ -2123,8 +2247,16 @@ static int pass_key(RPKey* k)
         k->color[i] = (uint32_t)t->f.vf;
         k->ncolor = (uint8_t)(i + 1);
     }
-    if (g_ds && g_ds->f.depth)
+    if (g_ds && g_ds->f.depth && !(g_rt[0] && g_ds->scene != g_rt[0]->scene && g_ds->rw < g_rt[0]->rw))
         k->depth = (uint32_t)g_ds->f.vf;
+    else if (g_ds && g_ds->f.depth)
+    {
+        static int told;
+        if (!told++)
+            rt_log("[gfx9] render scale: a %ux%u target drawn without the scene's %ux%u depth buffer\n", g_rt[0]->w,
+                g_rt[0]->h, g_ds->w, g_ds->h);
+    }
+    k->nodstore = 0;
     return k->ncolor || k->depth;
 }
 
@@ -2153,7 +2285,7 @@ static int begin_pass(void)
             return 0;
         tt[n] = t;
         uint32_t w, h, d;
-        level_dims(t, g_rt_level[i], &w, &h, &d);
+        real_dims(t, g_rt_level[i], &w, &h, &d);
         fw = w < fw ? w : fw, fh = h < fh ? h : fh;
         memcpy(cv[n].color.float32, g_clear_color, sizeof g_clear_color);
         n++;
@@ -2165,10 +2297,35 @@ static int begin_pass(void)
         if (!v[n])
             return 0;
         tt[n] = g_ds;
-        fw = g_ds->w < fw ? g_ds->w : fw, fh = g_ds->h < fh ? g_ds->h : fh;
+        fw = g_ds->rw < fw ? g_ds->rw : fw, fh = g_ds->rh < fh ? g_ds->rh : fh;
         cv[n].depthStencil = (VkClearDepthStencilValue){ g_clear_z, g_clear_stencil };
         n++;
     }
+    /* this pass's number, and whether it has to wait for earlier passes (see g_synced) */
+    uint32_t serial = g_pass_serial + 1;
+    if (g_syncall < 0)
+        g_syncall = getenv("XIV_VK_SYNCALL") && strcmp(getenv("XIV_VK_SYNCALL"), "0");
+    int sync = g_need_sync || g_syncall;
+    for (uint32_t c = 0; c <= k.ncolor && !sync; ++c)
+    {
+        G9Tex* t = c < k.ncolor ? (k.color[c] ? g_rt[c] : NULL) : (k.depth ? g_ds : NULL);
+        uint32_t lv = c < k.ncolor ? g_rt_level[c] : 0;
+        if (t && (t->wpass[lv < 16 ? lv : 15] > g_synced || (t->rpass > g_synced && t->rpass != serial)))
+            sync = 1; /* written since the last sync, or maybe still being sampled */
+    }
+    k.sync = (uint8_t)sync;
+    if (sync)
+        g_synced = g_pass_serial;
+    g_pass_serial = serial;
+    g_need_sync = 0;
+    for (uint32_t c = 0; c < k.ncolor; ++c)
+        if (k.color[c])
+        {
+            uint32_t lv = g_rt_level[c] < 16 ? g_rt_level[c] : 15;
+            g_rt[c]->wpass[lv] = serial, g_rt[c]->wmax = serial;
+        }
+    if (k.depth)
+        g_ds->wpass[0] = serial, g_ds->wmax = serial;
     VkRenderPass compat = render_pass(&k);
     k.cload = (g_pending_clear & 1) != 0;
     k.dload = (g_pending_clear & 2) != 0;
@@ -2191,13 +2348,20 @@ static int begin_pass(void)
         pf->pass_draws[pf->npass] = 0;
         g_pass_timed = 1;
     }
+    if (g_passlog)
+    {
+        G9Tex* t0 = k.ncolor ? g_rt[0] : NULL;
+        rt_log("[pass] %ux%u%s%s%s: rt0 %p (%ux%u, %u levels, format %u) level %u\n", fw, fh, k.depth ? " +depth" : "",
+            k.cload ? " clear" : " load", k.depth && !k.dload ? " depth-load" : "", (void*)t0, t0 ? t0->w : 0, t0 ? t0->h : 0,
+            t0 ? t0->levels : 0, t0 ? t0->fmt : 0, (unsigned)g_rt_level[0]);
+    }
     vkCmdBeginRenderPass(g_cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
     g_n_passes++;
     g_in_pass = 1;
     g_pending_clear = 0;
     g_targets_changed = 0;
     g_fb_w = fw, g_fb_h = fh;
-    k.cload = k.dload = k.sload = 0;
+    k.cload = k.dload = k.sload = k.sync = 0;
     g_pass_key = k;
     return 1;
 }
@@ -2266,6 +2430,8 @@ void g9_clear(uint32_t nrects, const int32_t* rects, uint32_t flags, uint32_t co
     if (!na)
         return;
     int32_t one[4] = { (int32_t)vp->x, (int32_t)vp->y, (int32_t)(vp->x + vp->w), (int32_t)(vp->y + vp->h) };
+    float rsx, rsy;
+    target_scale(&rsx, &rsy);
     const int32_t* rs = nrects ? rects : one;
     uint32_t n = nrects ? nrects : 1;
     for (uint32_t i = 0; i < n; ++i)
@@ -2282,6 +2448,11 @@ void g9_clear(uint32_t nrects, const int32_t* rects, uint32_t flags, uint32_t co
             if (r > scissor[2]) r = scissor[2];
             if (b > scissor[3]) b = scissor[3];
         }
+        if (rsx != 1.0f || rsy != 1.0f)
+        {
+            l = (int32_t)floorf(l * rsx), t = (int32_t)floorf(t * rsy);
+            r = (int32_t)ceilf(r * rsx), b = (int32_t)ceilf(b * rsy);
+        }
         if (l < 0) l = 0;
         if (t < 0) t = 0;
         if (r > (int32_t)g_fb_w) r = (int32_t)g_fb_w;
@@ -2293,6 +2464,8 @@ void g9_clear(uint32_t nrects, const int32_t* rects, uint32_t flags, uint32_t co
     }
 }
 
+#include "gfx9_scale_vk.h"
+
 /* --- StretchRect and ColorFill ------------------------------------------------------------------- */
 
 void g9_stretch(G9Tex* src, uint32_t sface, uint32_t slevel, const int32_t sr[4], G9Tex* dst, uint32_t dface,
@@ -2300,6 +2473,8 @@ void g9_stretch(G9Tex* src, uint32_t sface, uint32_t slevel, const int32_t sr[4]
 {
     if (!src || !dst || !g_dev || slevel >= src->levels || dlevel >= dst->levels)
         return;
+    up_note_stretch(src, dst);
+    src = up_stand_in(src);
     uint32_t sw, sh, sd, dw, dh, dd;
     level_dims(src, slevel, &sw, &sh, &sd);
     level_dims(dst, dlevel, &dw, &dh, &dd);
@@ -2308,6 +2483,9 @@ void g9_stretch(G9Tex* src, uint32_t sface, uint32_t slevel, const int32_t sr[4]
         memcpy(s, sr, sizeof s);
     if (dr)
         memcpy(d, dr, sizeof d);
+    rect_to_image(src, s);
+    if (rect_to_image(dst, d) || src->rw != src->w)
+        linear = 1; /* to or from a scaled target: filtered */
     uint32_t slayer = src->type == G9_TEX_CUBE ? sface : 0, dlayer = dst->type == G9_TEX_CUBE ? dface : 0;
     if (src == dst && slevel == dlevel && slayer == dlayer)
         return;
@@ -2773,6 +2951,8 @@ void g9_draw(const G9Draw* d)
     RPKey pk;
     if (!pass_key(&pk))
         return;
+    int exp_scene = g_exp_mode && d->rs.zenable && pk.depth;
+    up_hook(d);
     /* --- the shader variants this draw needs (as gfx9_metal.m) --- */
     SmOpts vo, po;
     memset(&vo, 0, sizeof vo);
@@ -2953,7 +3133,9 @@ void g9_draw(const G9Draw* d)
         aux.lod_bias[s] = d->samp[s].lod_bias;
     memcpy(aux.clip, d->clip, sizeof aux.clip);
     aux.clip_on[0] = d->clip_on;
-    aux.rscale[0] = aux.rscale[1] = 1.0f;
+    float rsx, rsy;
+    target_scale(&rsx, &rsy);
+    aux.rscale[0] = 1.0f / rsx, aux.rscale[1] = 1.0f / rsy; /* vPos in the game's pixels */
     const void* vparts[3] = { d->vsc, d->vsi, d->vsb };
     const uint32_t vsizes[3] = { G9_VS_FLOATS * 16, 16 * 16, 16 * 4 };
     const void* pparts[3] = { d->psc, d->psi, d->psb };
@@ -3051,11 +3233,23 @@ void g9_draw(const G9Draw* d)
         uint8_t type = vs ? vi->sampler[s] : pi->sampler[s];
         if (!type || (vs && s >= G9_VS_SAMPLERS))
             continue;
-        G9Tex* t = d->tex[b];
+        G9Tex* t = up_stand_in(d->tex[b]);
         int want = type == 3 ? G9_TEX_CUBE : type == 4 ? G9_TEX_3D : G9_TEX_2D;
         int shadow = !vs && ((po.shadow_mask >> s) & 1), depth = !vs && ((po.depth_mask >> s) & 1);
-        if (!t || t->type != want || !t->view || (t->f.depth && !shadow && !depth))
+        if (!t || t->type != want || !t->view || (t->f.depth && !shadow && !depth) || (exp_scene && g_exp_mode == 3))
             t = g_dummy[want == G9_TEX_CUBE ? 1 : want == G9_TEX_3D ? 2 : 0];
+        {
+            /* sampling what a pass since the last sync wrote: this draw's pass has to wait (a pass
+             * already begun is ended, and the next begins synced). Its own target: a feedback loop,
+             * as undefined in D3D9 */
+            uint32_t cur = g_in_pass ? g_pass_serial : g_pass_serial + 1;
+            if (t->wmax > g_synced && t->wmax != cur)
+                g_need_sync = 1;
+            t->rpass = cur;
+        }
+        if (g_passlog && g_fb_w < 256)
+            rt_log("[pass]   draw %u: s%u %p (%ux%u, %u levels, format %u, use %d)%s\n", d->count, b, (void*)t, t->w, t->h,
+                t->levels, t->fmt, t->use, t == g_rt[0] ? " = the target" : "");
         if (!t->inited)
         {
             end_pass();
@@ -3089,6 +3283,8 @@ void g9_draw(const G9Draw* d)
         return;
 
     /* --- the pass and the commands --- */
+    if (g_need_sync && g_in_pass)
+        end_pass(); /* this draw samples what an unsynced pass wrote: a synced pass from here */
     if (!begin_pass())
         return;
     if (g_trace)
@@ -3101,19 +3297,25 @@ void g9_draw(const G9Draw* d)
     }
     VkDescriptorSet sets[2] = { g_fr[g_frame].ubo_set, tset };
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 2, sets, 3, dyn);
-    VkViewport vp = { (float)d->vp.x, (float)d->vp.y, vw, vh, d->vp.minz, d->vp.maxz };
+    VkViewport vp = { d->vp.x * rsx, d->vp.y * rsy, vw * rsx, vh * rsy, d->vp.minz, d->vp.maxz };
     if (!g_bound.valid || memcmp(&vp, &g_bound.vp, sizeof vp))
         vkCmdSetViewport(cb, 0, 1, &vp), g_bound.vp = vp;
     VkRect2D sc = { { 0, 0 }, { g_fb_w, g_fb_h } };
     if (d->rs.scissor)
     {
-        int32_t l = d->scissor[0] > 0 ? d->scissor[0] : 0, t = d->scissor[1] > 0 ? d->scissor[1] : 0;
-        int32_t r = d->scissor[2] < (int32_t)g_fb_w ? d->scissor[2] : (int32_t)g_fb_w;
-        int32_t b = d->scissor[3] < (int32_t)g_fb_h ? d->scissor[3] : (int32_t)g_fb_h;
+        int32_t sc4[4] = { d->scissor[0], d->scissor[1], d->scissor[2], d->scissor[3] };
+        if (rsx != 1.0f || rsy != 1.0f)
+            sc4[0] = (int32_t)floorf(sc4[0] * rsx), sc4[1] = (int32_t)floorf(sc4[1] * rsy),
+            sc4[2] = (int32_t)ceilf(sc4[2] * rsx), sc4[3] = (int32_t)ceilf(sc4[3] * rsy);
+        int32_t l = sc4[0] > 0 ? sc4[0] : 0, t = sc4[1] > 0 ? sc4[1] : 0;
+        int32_t r = sc4[2] < (int32_t)g_fb_w ? sc4[2] : (int32_t)g_fb_w;
+        int32_t b = sc4[3] < (int32_t)g_fb_h ? sc4[3] : (int32_t)g_fb_h;
         if (r <= l || b <= t)
             return; /* nothing visible */
         sc = (VkRect2D){ { l, t }, { (uint32_t)(r - l), (uint32_t)(b - t) } };
     }
+    if (exp_scene && g_exp_mode == 1)
+        sc = (VkRect2D){ { 0, 0 }, { 1, 1 } };
     if (!g_bound.valid || memcmp(&sc, &g_bound.sc, sizeof sc))
         vkCmdSetScissor(cb, 0, 1, &sc), g_bound.sc = sc;
     float bias[2] = { d->rs.depth_bias * 16777215.0f, d->rs.slope_bias };
@@ -3137,6 +3339,8 @@ void g9_draw(const G9Draw* d)
     for (uint32_t s = 0; s <= G9_MAX_STREAMS - 1; ++s)
         if ((streams_used & (1u << s)) || (need_def && s == def))
             vkCmdBindVertexBuffers(cb, s, 1, &vbuf[s], &voff[s]);
+    if (exp_scene && g_exp_mode == 2)
+        return;
     if (ib)
     {
         vkCmdBindIndexBuffer(cb, ib, ioff, itype);
@@ -3153,7 +3357,13 @@ void g9_draw(const G9Draw* d)
 
 static VkSwapchainKHR g_swap;
 static VkFormat g_swap_format;
-static VkExtent2D g_swap_extent;
+static VkExtent2D g_swap_extent; /* the images' size: the panel's own orientation when pre-rotated */
+/* Pre-rotation (Android): the swapchain is made in the panel's orientation with the surface's current
+ * transform, and the present pass turns the picture itself (g_rot, a column-major 2x2 on clip space),
+ * so the compositor does not rotate every frame on the GPU. g_view_extent is the window's size as the
+ * game sees it (landscape). */
+static VkExtent2D g_view_extent;
+static float g_rot[4] = { 1, 0, 0, 1 };
 static uint32_t g_swap_req_w, g_swap_req_h; /* the window's size the swapchain was made for */
 static uint32_t g_nswap;
 static VkImage g_swap_img[8];
@@ -3166,11 +3376,11 @@ static VkShaderModule g_util_vs, g_util_fs;
 
 static const char UTIL_VS[] =
     "#version 450\n"
-    "layout(push_constant) uniform P { vec4 r; vec4 uv; } p;\n"
+    "layout(push_constant) uniform P { vec4 r; vec4 uv; vec4 rot; } p;\n"
     "layout(location = 0) out vec2 o_uv;\n"
     "void main() {\n"
     "    vec2 c = vec2(gl_VertexIndex & 1, gl_VertexIndex >> 1);\n"
-    "    gl_Position = vec4(mix(p.r.xy, p.r.zw, c), 0.0, 1.0);\n"
+    "    gl_Position = vec4(mat2(p.rot.xy, p.rot.zw) * mix(p.r.xy, p.r.zw, c), 0.0, 1.0);\n"
     "    o_uv = mix(p.uv.xy, p.uv.zw, c);\n"
     "}\n";
 static const char UTIL_FS[] =
@@ -3271,6 +3481,24 @@ static int swap_create(uint32_t w, uint32_t h)
     if (caps.maxImageExtent.height && ext.height > caps.maxImageExtent.height) ext.height = caps.maxImageExtent.height;
     if (!ext.width || !ext.height)
         return 0;
+    /* a quarter or half turn: the images in the panel's orientation, the picture turned by us */
+    VkSurfaceTransformFlagBitsKHR xf = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    VkSurfaceTransformFlagBitsKHR cur = caps.currentTransform;
+    const char* pre = getenv("XIV_VK_PREROTATE");
+    if ((!pre || strcmp(pre, "0")) && (caps.supportedTransforms & cur) &&
+        (cur == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR || cur == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR ||
+            cur == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR))
+        xf = cur;
+    g_view_extent = ext;
+    if (xf == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR || xf == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR)
+        ext = (VkExtent2D){ ext.height, ext.width };
+    static const float rots[4][4] = { { 1, 0, 0, 1 }, { 0, 1, -1, 0 }, { -1, 0, 0, -1 }, { 0, -1, 1, 0 } };
+    int ri = xf == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ? 1 : xf == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR ? 2
+           : xf == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR ? 3 : 0;
+    const char* flip = getenv("XIV_VK_ROTFLIP"); /* the other way round, should a device turn the other way */
+    if (flip && strcmp(flip, "0") && (ri == 1 || ri == 3))
+        ri = 4 - ri;
+    memcpy(g_rot, rots[ri], sizeof g_rot);
     uint32_t nf = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(g_phys, g_surface, &nf, NULL);
     VkSurfaceFormatKHR fmts[64];
@@ -3311,8 +3539,11 @@ static int swap_create(uint32_t w, uint32_t h)
     ci.imageArrayLayers = 1;
     ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    ci.preTransform = (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
-                                                                                         : caps.currentTransform;
+    ci.preTransform = xf != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR ? xf
+                    : (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+                                                                                        : caps.currentTransform;
+    if (ri == 0 && ci.preTransform != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+        g_view_extent = ext;
     ci.compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
                         : (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) ? VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR
                                                                                             : VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
@@ -3361,15 +3592,22 @@ static int swap_create(uint32_t w, uint32_t h)
         VkSemaphoreCreateInfo si = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
         vkCreateSemaphore(g_dev, &si, NULL, &g_swap_done[i]);
     }
+    if (ri)
+        rt_log("[gfx9] swapchain pre-rotated %d degrees for the panel's orientation\n", ri * 90);
     rt_log("[gfx9] swapchain %ux%u, %u images, format %d, %s\n", ext.width, ext.height, g_nswap, sf.format,
         pm == VK_PRESENT_MODE_FIFO_KHR ? "vsync" : pm == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "immediate");
     return 1;
 }
 
+static void present_idle(void);
+
 static void swap_recreate(void)
 {
+    present_idle();
     submit(1, VK_NULL_HANDLE, VK_NULL_HANDLE);
+    pthread_mutex_lock(&g_qlock);
     vkDeviceWaitIdle(g_dev);
+    pthread_mutex_unlock(&g_qlock);
     swap_destroy();
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels((SDL_Window*)g_sdl_window, &w, &h);
@@ -3402,13 +3640,86 @@ static void pcache_save(void)
     free(data);
 }
 
+/* the present thread: each frame's present, in order, as the render thread hands them over */
+static void* present_main(void* arg)
+{
+    (void)arg;
+    for (;;)
+    {
+        pthread_mutex_lock(&g_pmx);
+        while (!g_ppending)
+            pthread_cond_wait(&g_pcond, &g_pmx);
+        uint32_t img = g_pimg;
+        VkSemaphore sem = g_psem;
+        VkSwapchainKHR sw = g_pswap;
+        g_ppending = 0, g_pbusy = 1;
+        pthread_cond_broadcast(&g_pcond);
+        pthread_mutex_unlock(&g_pmx);
+        VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+        pi.waitSemaphoreCount = 1;
+        pi.pWaitSemaphores = &sem;
+        pi.swapchainCount = 1;
+        pi.pSwapchains = &sw;
+        pi.pImageIndices = &img;
+        uint64_t t0 = now_ns();
+        pthread_mutex_lock(&g_qlock);
+        VkResult r = vkQueuePresentKHR(g_queue, &pi);
+        pthread_mutex_unlock(&g_qlock);
+        __atomic_add_fetch(&g_t_present, now_ns() - t0, __ATOMIC_RELAXED);
+        if (r == VK_ERROR_OUT_OF_DATE_KHR)
+            g_pstale = 1;
+        pthread_mutex_lock(&g_pmx);
+        g_pbusy = 0;
+        pthread_cond_broadcast(&g_pcond);
+        pthread_mutex_unlock(&g_pmx);
+    }
+    return NULL;
+}
+
+/* every handed-over present made (before the swapchain changes) */
+static void present_idle(void)
+{
+    if (g_pthread <= 0)
+        return;
+    pthread_mutex_lock(&g_pmx);
+    while (g_ppending || g_pbusy)
+        pthread_cond_wait(&g_pcond, &g_pmx);
+    pthread_mutex_unlock(&g_pmx);
+}
+
 void g9_present(G9Tex* bb)
 {
     if (!g_dev)
         return;
+    {
+        static long start = -2, begun = -1;
+        static uint64_t frames, t0, tfirst;
+        if (start == -2)
+            start = getenv("XIV_VK_EXPERIMENT") ? atol(getenv("XIV_VK_EXPERIMENT")) : -1;
+        static long logframe = -2;
+        if (logframe == -2)
+            logframe = getenv("XIV_VK_PASSLOG") ? atol(getenv("XIV_VK_PASSLOG")) : -1;
+        ++frames;
+        if (!tfirst)
+            tfirst = now_ns();
+        if (start >= 0 && begun < 0 && now_ns() - tfirst >= (uint64_t)start * 1000000000u)
+            begun = (long)frames;
+        g_passlog = logframe >= 0 && (long)frames == logframe; /* the frame after this present */
+        if (g_passlog)
+            rt_log("[pass] frame %ld\n", logframe);
+        if (begun >= 0 && ((long)frames - begun) % 300 == 0)
+        {
+            uint64_t t = now_ns();
+            if (t0)
+                rt_log("[gfx9] experiment mode %d: %.1f fps\n", g_exp_mode, 300e9 / (double)(t - t0));
+            g_exp_mode = (int)(((long)frames - begun) / 300 % 4);
+            t0 = t;
+        }
+    }
     if (g_pending_clear)
         begin_pass();
     end_pass();
+    up_frame_end(bb);
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels((SDL_Window*)g_sdl_window, &w, &h);
     if (w > 0 && h > 0 && ((uint32_t)w != g_swap_req_w || (uint32_t)h != g_swap_req_h))
@@ -3425,7 +3736,9 @@ void g9_present(G9Tex* bb)
     Frame* f = &g_fr[g_frame];
     uint32_t img = 0;
     uint64_t t0 = g_prof ? now_ns() : 0;
+    pthread_mutex_lock(&g_qlock);
     VkResult r = vkAcquireNextImageKHR(g_dev, g_swap, UINT64_MAX, f->acquired, VK_NULL_HANDLE, &img);
+    pthread_mutex_unlock(&g_qlock);
     if (g_prof)
         g_t_acquire += now_ns() - t0;
     if (r == VK_ERROR_OUT_OF_DATE_KHR || (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR))
@@ -3446,8 +3759,8 @@ void g9_present(G9Tex* bb)
     vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
     if (bb && bb->view && g_present_pipe)
     {
-        float dw = (float)g_swap_extent.width, dh = (float)g_swap_extent.height;
-        VkViewport vp = { 0, 0, dw, dh, 0, 1 };
+        float dw = (float)g_view_extent.width, dh = (float)g_view_extent.height;
+        VkViewport vp = { 0, 0, (float)g_swap_extent.width, (float)g_swap_extent.height, 0, 1 };
         VkRect2D sc = { { 0, 0 }, g_swap_extent };
         vkCmdSetViewport(cb, 0, 1, &vp);
         vkCmdSetScissor(cb, 0, 1, &sc);
@@ -3463,7 +3776,7 @@ void g9_present(G9Tex* bb)
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_util_playout, 0, 1, &ds, 0, NULL);
         /* the back buffer scaled to the window, aspect kept */
         float s = fminf(dw / bb->w, dh / bb->h), qw = bb->w * s / dw, qh = bb->h * s / dh;
-        float pc[8] = { -qw, -qh, qw, qh, 0, 0, 1, 1 };
+        float pc[12] = { -qw, -qh, qw, qh, 0, 0, 1, 1, g_rot[0], g_rot[1], g_rot[2], g_rot[3] };
         vkCmdPushConstants(cb, g_util_playout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof pc, pc);
         vkCmdDraw(cb, 4, 1, 0, 0);
     }
@@ -3472,7 +3785,7 @@ void g9_present(G9Tex* bb)
         /* the shapes come in the window's pixels (ios_touch.c's points times its density) */
         int pw = 0, ph = 0;
         SDL_GetWindowSizeInPixels((SDL_Window*)g_sdl_window, &pw, &ph);
-        draw_touch(cb, g_swap_extent.width, g_swap_extent.height, pw > 0 ? (float)g_swap_extent.width / (float)pw : 1.0f);
+        draw_touch(cb, g_view_extent.width, g_view_extent.height, pw > 0 ? (float)g_view_extent.width / (float)pw : 1.0f);
     }
     vkCmdEndRenderPass(cb);
     reset_bound_state();
@@ -3485,11 +3798,44 @@ void g9_present(G9Tex* bb)
     pi.pSwapchains = &g_swap;
     pi.pImageIndices = &img;
     t0 = g_prof ? now_ns() : 0;
-    r = vkQueuePresentKHR(g_queue, &pi);
+    if (g_pthread < 0)
+    {
+        const char* pt = getenv("XIV_VK_PRESENT_THREAD");
+#if defined(__ANDROID__)
+        g_pthread = !pt || strcmp(pt, "0");
+#else
+        g_pthread = pt && strcmp(pt, "0");
+#endif
+        pthread_t th;
+        if (g_pthread && pthread_create(&th, NULL, present_main, NULL) != 0)
+            g_pthread = 0;
+        if (g_pthread)
+            pthread_detach(th), rt_log("[gfx9] presenting from a thread of its own\n");
+    }
+    if (g_pthread)
+    {
+        /* one present waiting at most: the next frame is recorded while the GPU draws this one */
+        pthread_mutex_lock(&g_pmx);
+        while (g_ppending)
+            pthread_cond_wait(&g_pcond, &g_pmx);
+        g_pimg = img, g_psem = done, g_pswap = g_swap;
+        g_ppending = 1;
+        pthread_cond_broadcast(&g_pcond);
+        pthread_mutex_unlock(&g_pmx);
+        r = g_pstale ? VK_ERROR_OUT_OF_DATE_KHR : VK_SUCCESS;
+        g_pstale = 0;
+    }
+    else
+    {
+        pthread_mutex_lock(&g_qlock);
+        r = vkQueuePresentKHR(g_queue, &pi);
+        pthread_mutex_unlock(&g_qlock);
+    }
     if (g_prof)
     {
         static uint32_t frames;
-        g_t_present += now_ns() - t0;
+        if (!g_pthread)
+            g_t_present += now_ns() - t0;
         if (++frames % 600 == 0)
         {
             rt_log("[gfx9] GPU %.2f ms a command buffer\n", g_n_gpu ? g_t_gpu / 1e6 / g_n_gpu : 0.0);
@@ -3764,6 +4110,21 @@ int g9_init(void* sdl_window, int vsync)
         want[nwant++] = VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME, g_mirror_once = 1;
     if (has_ext(dext, ndev, VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME))
         want[nwant++] = VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME, g_format_list = 1;
+    /* by default where the device has the control: Mali's per-pass cost on the game's 128x128 mip
+     * chains fell about a quarter (0.30 to 0.23 ms a pass on the Pixel 6a) */
+    const char* nocomp = getenv("XIV_VK_NOCOMP");
+    g_nocomp = nocomp ? (uint32_t)atoi(nocomp) : 128;
+    VkPhysicalDeviceImageCompressionControlFeaturesEXT ccf = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_COMPRESSION_CONTROL_FEATURES_EXT };
+    if (has_ext(dext, ndev, VK_EXT_IMAGE_COMPRESSION_CONTROL_EXTENSION_NAME) && vkGetPhysicalDeviceFeatures2)
+    {
+        VkPhysicalDeviceFeatures2 f2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+        f2.pNext = &ccf;
+        vkGetPhysicalDeviceFeatures2(g_phys, &f2);
+        if (g_nocomp && ccf.imageCompressionControl)
+            want[nwant++] = VK_EXT_IMAGE_COMPRESSION_CONTROL_EXTENSION_NAME, g_comp_ctl = 1;
+    }
+    if (g_nocomp && (nocomp || g_comp_ctl))
+        rt_log("[gfx9] render targets up to %u uncompressed: %s\n", g_nocomp, g_comp_ctl ? "compression control" : "as storage images");
     int float_ext = has_ext(dext, ndev, VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME);
     if (float_ext)
         want[nwant++] = VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME;
@@ -3798,6 +4159,10 @@ int g9_init(void* sdl_window, int vsync)
     dci.enabledExtensionCount = nwant;
     dci.ppEnabledExtensionNames = want;
     dci.pEnabledFeatures = &g_feat;
+    VkPhysicalDeviceImageCompressionControlFeaturesEXT ccon = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_COMPRESSION_CONTROL_FEATURES_EXT };
+    ccon.imageCompressionControl = VK_TRUE;
+    if (g_comp_ctl)
+        dci.pNext = &ccon;
     r = vkCreateDevice(g_phys, &dci, NULL, &g_dev);
     if (r != VK_SUCCESS)
     {
@@ -3851,7 +4216,7 @@ int g9_init(void* sdl_window, int vsync)
         vkCreateFence(g_dev, &fi, NULL, &f->fence);
         VkSemaphoreCreateInfo si = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
         vkCreateSemaphore(g_dev, &si, NULL, &f->acquired);
-        if (g_prof)
+        if (g_prof || up_timed())
         {
             VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
             qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
@@ -3896,7 +4261,7 @@ int g9_init(void* sdl_window, int vsync)
     pli.setLayoutCount = 2;
     pli.pSetLayouts = sl;
     vkCreatePipelineLayout(g_dev, &pli, NULL, &g_layout);
-    VkPushConstantRange pcr = { VK_SHADER_STAGE_VERTEX_BIT, 0, 32 };
+    VkPushConstantRange pcr = { VK_SHADER_STAGE_VERTEX_BIT, 0, 48 };
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &g_util_layout;
     pli.pushConstantRangeCount = 1;

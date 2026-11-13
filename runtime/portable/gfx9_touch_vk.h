@@ -8,15 +8,20 @@
 
 static const char TOUCH_VS[] =
     "#version 450\n"
-    "layout(push_constant) uniform U { vec4 rect; vec4 cell; uint kind, sym, pressed; float alpha; vec2 size; } u;\n"
+    "layout(push_constant) uniform U { vec4 rect; vec4 cell; uint kind, sym, pressed; float alpha; vec2 size; vec2 phys; vec4 rot; } u;\n"
     "void main() {\n"
     "    vec2 c = u.rect.xy + vec2((gl_VertexIndex & 1) != 0 ? u.rect.z : 0.0, (gl_VertexIndex & 2) != 0 ? u.rect.w : 0.0);\n"
-    "    gl_Position = vec4(c.x / u.size.x * 2.0 - 1.0, c.y / u.size.y * 2.0 - 1.0, 0.0, 1.0);\n"
+    "    gl_Position = vec4(mat2(u.rot.xy, u.rot.zw) * vec2(c.x / u.size.x * 2.0 - 1.0, c.y / u.size.y * 2.0 - 1.0), 0.0, 1.0);\n"
     "}\n";
 static const char TOUCH_FS[] =
     "#version 450\n"
-    "layout(push_constant) uniform U { vec4 rect; vec4 cell; uint kind, sym, pressed; float alpha; vec2 size; } u;\n"
+    "layout(push_constant) uniform U { vec4 rect; vec4 cell; uint kind, sym, pressed; float alpha; vec2 size; vec2 phys; vec4 rot; } u;\n"
     "layout(set = 0, binding = 0) uniform sampler2D labels;\n"
+    /* the pixel in the window as the game sees it (the images may be in the panel's orientation) */
+    "vec2 view_coord() {\n"
+    "  vec2 n = transpose(mat2(u.rot.xy, u.rot.zw)) * (gl_FragCoord.xy / u.phys * 2.0 - 1.0);\n"
+    "  return (n + 1.0) * 0.5 * u.size;\n"
+    "}\n"
     "layout(location = 0) out vec4 o;\n"
     "float clamp01(float x) { return clamp(x, 0.0, 1.0); }\n"
     "float seg(vec2 p, vec2 a, vec2 b) {\n"
@@ -32,7 +37,7 @@ static const char TOUCH_FS[] =
     "  return length(d) - r;\n"
     "}\n"
     "void main() {\n"
-    "  vec2 hf = u.rect.zw * 0.5, c = u.rect.xy + hf, d = gl_FragCoord.xy - c;\n"
+    "  vec2 hf = u.rect.zw * 0.5, c = u.rect.xy + hf, d = view_coord() - c;\n"
     "  float r = min(hf.x, hf.y) * 0.86, sd = body_sd(u.kind, d, hf, r);\n"
     "  float body = 1.0 - smoothstep(-1.5, 0.0, sd);\n"
     "  float shadow = (1.0 - smoothstep(0.0, r * 0.2, body_sd(u.kind, d - vec2(0.0, r * 0.06), hf, r))) * 0.3;\n"
@@ -104,7 +109,8 @@ typedef struct
     float rect[4], cell[4];
     uint32_t kind, sym, pressed;
     float alpha;
-    float size[2];
+    float size[2], phys[2]; /* the window as the game sees it, the images */
+    float rot[4];           /* g_rot */
 } TouchU;
 
 enum
@@ -286,8 +292,8 @@ static void draw_touch(VkCommandBuffer cb, uint32_t w, uint32_t h, float k)
     pthread_mutex_unlock(&g_touch_lock);
     if (!n || !g_touch_pipe || !g_labels)
         return;
-    VkViewport vp = { 0, 0, (float)w, (float)h, 0, 1 };
-    VkRect2D sc = { { 0, 0 }, { w, h } };
+    VkViewport vp = { 0, 0, (float)g_swap_extent.width, (float)g_swap_extent.height, 0, 1 };
+    VkRect2D sc = { { 0, 0 }, g_swap_extent };
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_touch_pipe);
@@ -318,6 +324,8 @@ static void draw_touch(VkCommandBuffer cb, uint32_t w, uint32_t h, float k)
             u.cell[2] = 1.0f / LABEL_COLS, u.cell[3] = 1.0f / LABEL_ROWS;
         }
         u.size[0] = (float)w, u.size[1] = (float)h;
+        u.phys[0] = (float)g_swap_extent.width, u.phys[1] = (float)g_swap_extent.height;
+        memcpy(u.rot, g_rot, sizeof u.rot);
         vkCmdPushConstants(cb, g_touch_playout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof u, &u);
         vkCmdDraw(cb, 4, 1, 0, 0);
     }
