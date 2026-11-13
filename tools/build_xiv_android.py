@@ -133,10 +133,15 @@ def lib(exe):
     objs += compile_all(['tests/xivboot_android.c', 'tests/ios_touch.c', 'tests/xiv_args.c', 'tests/blowfish.c'], 'entry', ours)
     out = os.path.join(OUT, 'libmain.so')
     cache = os.path.join(OUT, 'lto-cache')
+    # the objects in a response file: on one command line they pass Windows' limit of 32,767 characters.
+    # Forward slashes in double quotes read the same under clang's GNU and Windows quoting.
+    rsp = os.path.join(OUT, 'objects.rsp')
+    with open(rsp, 'w') as f:
+        f.write('\n'.join('"%s"' % o.replace('\\', '/') for o in objs) + '\n')
     build_xiv.run_lto([CC, '-shared', '-o', out, '-flto=thin', '-O3', CPU, '-fPIC', '-Wl,-soname,libmain.so',
                        '-Wl,-z,max-page-size=16384', '-Wl,--no-undefined', '-Wl,--thinlto-cache-dir=' + cache,
                        '-Wl,--thinlto-jobs=%d' % (os.cpu_count() or 4)]
-                      + objs + ['-L' + SDL_LIB, '-lSDL3']
+                      + ['@' + rsp] + ['-L' + SDL_LIB, '-lSDL3']
                       + (['-L' + str(GLSLANG / 'lib')] + GLSLANG_LIBS + ['-lvulkan', '-l:libc++_static.a', '-l:libc++abi.a'] if VULKAN else [])
                       + ['-llog', '-landroid', '-lm', '-ldl'],
                       os.path.relpath(cache, ROOT), len(gen))
