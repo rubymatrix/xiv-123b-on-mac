@@ -2,10 +2,14 @@
  * /SERVER_UTC =1356916742 /SESSION_ID =<id>" and its NUL, Blowfish (ECB, key the 8 hex digits of
  * tick & ~0xFFFF) over the whole 8-byte blocks with each 32-bit word's bytes swapped before and
  * after (the game's little-endian halves), the tail left plain; base64 with - and _, as
- * sqex0002<that>!////. Blowfish is CommonCrypto's. */
+ * sqex0002<that>!////. Blowfish is CommonCrypto's on Apple systems, blowfish.c elsewhere. */
 #include "xiv_args.h"
 
+#if defined(__APPLE__)
 #include <CommonCrypto/CommonCryptor.h>
+#else
+#include "blowfish.h"
+#endif
 #include <stdio.h>
 #include <string.h>
 
@@ -31,14 +35,20 @@ int xiv_launch_arg(const char* session_id, uint32_t tick, char* out, size_t n)
     size_t full = total & ~(size_t)7;
     char key[9];
     snprintf(key, sizeof key, "%08x", tick & ~0xFFFFu);
+    swap32(buf, full);
+#if defined(__APPLE__)
     uint8_t enc[256];
     size_t moved = 0;
-    swap32(buf, full);
     if (CCCrypt(kCCEncrypt, kCCAlgorithmBlowfish, kCCOptionECBMode, key, 8, NULL, buf, full, enc, sizeof enc, &moved) !=
             kCCSuccess || moved != full)
         return 0;
-    swap32(enc, full);
     memcpy(buf, enc, full);
+#else
+    Blowfish bf;
+    blowfish_init(&bf, (const uint8_t*)key, 8);
+    blowfish_ecb_encrypt(&bf, buf, full);
+#endif
+    swap32(buf, full);
     static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     size_t o = (size_t)snprintf(out, n, "sqex0002");
     for (size_t i = 0; i < total; i += 3)

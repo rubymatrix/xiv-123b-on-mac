@@ -130,7 +130,7 @@ def lib(exe):
         host += ['runtime/portable/gfx9_null.c']
     objs += compile_all(portable + host, 'runtime', ours)
     objs += compile_all(['tests/xivboot.c'], 'xivboot', ours + ['-Dmain=xivboot_main'])
-    objs += compile_all(['tests/xivboot_android.c', 'tests/ios_touch.c'], 'entry', ours)
+    objs += compile_all(['tests/xivboot_android.c', 'tests/ios_touch.c', 'tests/xiv_args.c', 'tests/blowfish.c'], 'entry', ours)
     out = os.path.join(OUT, 'libmain.so')
     cache = os.path.join(OUT, 'lto-cache')
     build_xiv.run_lto([CC, '-shared', '-o', out, '-flto=thin', '-O3', CPU, '-fPIC', '-Wl,-soname,libmain.so',
@@ -141,6 +141,24 @@ def lib(exe):
                       + ['-llog', '-landroid', '-lm', '-ldl'],
                       os.path.relpath(cache, ROOT), len(gen))
     print('built %s' % out)
+    icon(exe)
+
+
+def icon(exe):
+    """the app's icon from the player's ffxivboot.exe (else ffxivgame.exe), into build/android/res
+    (tools/android_icon.py); none when neither has one the tool can read"""
+    import android_icon
+    res = os.path.join(OUT, 'res')
+    shutil.rmtree(res, ignore_errors=True)
+    folder = os.path.dirname(exe)
+    for src in (os.path.join(folder, 'ffxivboot.exe'), exe):
+        try:
+            if os.path.exists(src) and android_icon.make(src, res):
+                print('icon from %s' % os.path.basename(src))
+                return
+        except Exception as e:  # an icon is not worth a failed build
+            print('no icon from %s: %s' % (os.path.basename(src), e))
+    shutil.rmtree(res, ignore_errors=True)
 
 
 # --- the APK ---------------------------------------------------------------------------------------
@@ -191,8 +209,18 @@ def apk():
         run([os.path.join(bt, 'd8' + ('.bat' if EXE else '')), '--min-api', str(API), '--lib', jar, '--output', dex]
             + sorted(glob.glob(os.path.join(classes, '**', '*.class'), recursive=True)))
         unsigned = os.path.join(work, 'unsigned.apk')
-        run([os.path.join(bt, 'aapt' + EXE), 'package', '-f', '-M', os.path.join(ROOT, 'android/xiv/AndroidManifest.xml'),
-             '-I', jar, '-F', unsigned])
+        manifest = os.path.join(ROOT, 'android/xiv/AndroidManifest.xml')
+        res = os.path.join(OUT, 'res')
+        extra = []
+        if os.path.isdir(os.path.join(res, 'mipmap-anydpi-v26')):
+            # the icon made from the player's game files (icon()): the manifest names it
+            with open(manifest) as f:
+                text = f.read().replace('<application', '<application android:icon="@mipmap/ic_launcher"', 1)
+            manifest = os.path.join(work, 'AndroidManifest.xml')
+            with open(manifest, 'w') as f:
+                f.write(text)
+            extra = ['-S', res]
+        run([os.path.join(bt, 'aapt' + EXE), 'package', '-f', '-M', manifest, '-I', jar, '-F', unsigned] + extra)
         stripped = os.path.join(work, 'libmain.so')
         shutil.copyfile(lib_so, stripped)
         run([str(TC / ('llvm-strip' + EXE)), '--strip-debug', stripped])
