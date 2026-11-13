@@ -76,7 +76,7 @@ def compile_all(sources, group, extra):
     headers = build_xiv.newest_header()
     jobs, objs = [], []
     for s in sources:
-        obj = os.path.join(objdir, s.replace('/', '_') + '.o')
+        obj = os.path.join(objdir, s.replace(os.sep, '/').replace('/', '_') + '.o')  # relpath gives backslashes on Windows
         objs.append(obj)
         cmd = [CC, '-c'] + extra + [s, '-o', obj]
         key = hashlib.sha256(json.dumps(cmd).encode()).hexdigest()
@@ -207,7 +207,7 @@ def apk():
                       + glob.glob(os.path.join(ROOT, 'android/xiv/java/**/*.java'), recursive=True))
         classes = os.path.join(work, 'classes')
         os.makedirs(classes)
-        run([os.path.join(jdk, 'bin', 'javac' + EXE), '-nowarn', '-source', '8', '-target', '8', '-bootclasspath', jar,
+        run([os.path.join(jdk, 'bin', 'javac' + EXE), '-nowarn', '-encoding', 'UTF-8', '-source', '8', '-target', '8', '-bootclasspath', jar,
              '-d', classes] + java)
         dex = os.path.join(work, 'dex')
         os.makedirs(dex)
