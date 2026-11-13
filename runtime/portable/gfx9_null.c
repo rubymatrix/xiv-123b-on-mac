@@ -35,6 +35,10 @@ int navdraw_key(int sc, int down, int shift)
     return 0;
 }
 
+/* the touch controls (touch.h): nothing to draw them on */
+#include "touch.h"
+void gfx_set_touch_shapes(const GfxTouchShape* shapes, int n) { (void)shapes, (void)n; }
+
 int g9_init(void* sdl_window, int vsync)
 {
     (void)sdl_window, (void)vsync;

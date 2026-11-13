@@ -4,7 +4,8 @@
  * external files folder (/sdcard/Android/data/<app>/files/FINAL FANTASY XIV, where adb pushes it),
  * reads run.args there (as on iOS: XIV_ lines set the environment, others are xivboot's arguments),
  * sends the log to xivboot.log there, sizes the first config.sys for the screen, then starts the boot
- * test (tests/xivboot.c, built with main renamed to xivboot_main). */
+ * test (tests/xivboot.c, built with main renamed to xivboot_main), with iOS's touch controls
+ * (tests/ios_touch.c) over it. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,26 @@
 #include <SDL3/SDL_main.h>
 
 int xivboot_main(int argc, char** argv);
+extern void (*xivboot_main_hook)(void); /* xivboot.c */
+void ios_touch_init(void);              /* ios_touch.c: the touch controls, shared with iOS */
+void ios_touch_frame(int in_game);
+
+static int g_touch_on;
+
+/* Each turn of the main loop (SDL is up by the first): the touch controls set up once, then laid out
+ * at about 60 Hz (XIV_TOUCH=0: none), as on iOS */
+static void main_tick(void)
+{
+    static int up;
+    static Uint64 last;
+    if (!g_touch_on)
+        return;
+    Uint64 now = SDL_GetTicks();
+    if (!up)
+        up = 1, ios_touch_init();
+    if (now - last >= 16)
+        last = now, ios_touch_frame(1);
+}
 
 /* the Mac's Dock icon (app_icon.m): an Android app's icon is its package's */
 void app_icon_from_image(uint32_t base) { (void)base; }
@@ -110,6 +131,10 @@ int main(int argc, char** argv)
     setenv("XIV_DOCUMENTS", files, 0); /* the game's My Games under the app's files */
     setenv("XIV_DISCORD", "log", 0); /* no Discord app: where the game is goes to the log ([state]) */
     screen_size();
+    g_touch_on = !getenv("XIV_TOUCH") || strcmp(getenv("XIV_TOUCH"), "0");
+    xivboot_main_hook = main_tick;
+    if (g_touch_on)
+        setenv("XIV_VPAD", "1", 0); /* a pad 0 from the start, which the touch controls' buttons go to (xivboot_ios.c) */
     if (!getenv("XIV_ARGS"))
         fprintf(stderr, "[android] no XIV_ARGS in run.args: the game will not get past its title\n");
 

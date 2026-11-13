@@ -105,6 +105,10 @@ static int g_shown;              /* the controls are up (the game, no real contr
 static int g_hidden;             /* put away with the toggle */
 static int g_bold;               /* high contrast (the toggle's second state; Documents/touch-style.txt) */
 static float g_density = 1.0f;   /* the window's pixels a point */
+/* the window's units a point: 1 where SDL measures windows in points (iOS, the Mac); on Android,
+ * where it measures them in pixels, the display's scale (about 2.6 on a Pixel 6a). Everything here is
+ * in points: what comes from SDL is divided by it, what goes back multiplied. */
+static float g_u = 1.0f;
 static float g_stick_x, g_stick_y; /* the stick's resting place */
 static int g_editing;            /* the layout is being edited (the toggle held) */
 static int g_group;              /* the group add() puts controls in */
@@ -194,6 +198,7 @@ static Uint32 SDLCALL click_up(void* unused, SDL_TimerID timer, Uint32 interval)
 static void click(SDL_WindowID window, float x, float y)
 {
     window = game_window(window);
+    x *= g_u, y *= g_u; /* the window's units */
     g_click.window = window, g_click.x = x, g_click.y = y;
     SDL_Event m;
     SDL_zero(m);
@@ -375,10 +380,13 @@ static void layout(SDL_Window* win, int controls)
     SDL_GetWindowSizeInPixels(win, &pw, NULL);
     if (w <= 0 || h <= 0 || !SDL_GetWindowSafeArea(win, &safe))
         return;
+    float pd = SDL_GetWindowPixelDensity(win), ds = SDL_GetWindowDisplayScale(win);
+    g_u = pd > 0 && ds > pd ? ds / pd : 1.0f;
+    w = (int)((float)w / g_u), h = (int)((float)h / g_u);
     g_density = (float)pw / (float)w;
     g_nctl = 0;
     g_win = win;
-    float sx = (float)safe.x, sy = (float)safe.y, sw = (float)safe.w, sh = (float)safe.h;
+    float sx = safe.x / g_u, sy = safe.y / g_u, sw = safe.w / g_u, sh = safe.h / g_u;
     g_safe = (SDL_FRect){ sx, sy, sw, sh };
     char shape[32];
     snprintf(shape, sizeof shape, "%dx%d", w, h);
@@ -386,7 +394,7 @@ static void layout(SDL_Window* win, int controls)
         snprintf(g_shape, sizeof g_shape, "%s", shape), load_layout();
     g_group = G_NONE;
     /* the toggle: in a phone's black bar left of the game, else in the safe area's top-left corner */
-    int bar = safe.x >= TOGGLE + 8;
+    int bar = sx >= TOGGLE + 8;
     float tx = bar ? sx * 0.5f : sx + TOGGLE_MARGIN + TOGGLE * 0.5f;
     float ty = sy + (bar ? BAR_TOP : TOGGLE_MARGIN) + TOGGLE * 0.5f;
     add(C_TOGGLE, 0, GFX_TOUCH_BUTTON, GFX_SYM_PAD, NULL, tx, ty, TOGGLE * 0.5f, TOGGLE * 0.5f);
@@ -721,7 +729,7 @@ static int pointer(const SDL_Event* e)
     {
         if (!f)
             return 1; /* hovering: the game's cursor */
-        finger_moved(f, e->motion.x, e->motion.y);
+        finger_moved(f, e->motion.x / g_u, e->motion.y / g_u);
         draw();
         return 0;
     }
@@ -732,10 +740,11 @@ static int pointer(const SDL_Event* e)
     SDL_Window* win = SDL_GetWindowFromID(t.windowID);
     if (win)
         SDL_GetWindowSize(win, &w, &h);
+    w = (int)((float)w / g_u), h = (int)((float)h / g_u);
     if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN && !f)
-        finger_down(&t, e->button.x, e->button.y, w, h);
+        finger_down(&t, e->button.x / g_u, e->button.y / g_u, w, h);
     else if (e->type == SDL_EVENT_MOUSE_BUTTON_UP && f)
-        finger_up(&t, f, e->button.x, e->button.y);
+        finger_up(&t, f, e->button.x / g_u, e->button.y / g_u);
     draw();
     return 0;
 }
@@ -751,7 +760,7 @@ static bool SDLCALL keep_event(void* unused, SDL_Event* e)
     SDL_MouseID which = button ? e->button.which : e->motion.which;
     if (which == CLICK_MOUSE)
         return true;
-    float x = button ? e->button.x : e->motion.x, y = button ? e->button.y : e->motion.y;
+    float x = (button ? e->button.x : e->motion.x) / g_u, y = (button ? e->button.y : e->motion.y) / g_u;
     SDL_LockMutex(g_lock);
     int keep;
     int i = hit(x, y);
@@ -808,6 +817,7 @@ static bool SDLCALL touch(void* unused, SDL_Event* e)
     SDL_Window* win = SDL_GetWindowFromID(e->tfinger.windowID);
     if (win)
         SDL_GetWindowSize(win, &w, &h);
+    w = (int)((float)w / g_u), h = (int)((float)h / g_u);
     float x = e->tfinger.x * (float)w, y = e->tfinger.y * (float)h;
     SDL_LockMutex(g_lock);
     Finger* f = finger(e->tfinger.fingerID);
@@ -941,10 +951,45 @@ void ios_touch_frame(int in_game)
     SDL_UnlockMutex(g_lock);
 }
 
+#if defined(__ANDROID__)
+/* Android: SDL delivers touches on Java's UI thread, not the game's SDL thread as on iOS, and an
+ * event filter or watch runs under SDL's event lock there. Taking g_lock in one while the SDL thread
+ * held it and attached the pad (an event: SDL's event lock) froze both. So here the events are taken
+ * where the runtime reads them, on the SDL thread (user32_event_hook), and SDL makes no mouse of
+ * touches: the controls' taps are clicks of their own (click()). */
+extern int (*user32_event_hook)(const void* sdl_event, int window_w, int window_h); /* user32.c */
+
+static int touch_hook(const void* event, int window_w, int window_h)
+{
+    SDL_Event* e = (SDL_Event*)event;
+    (void)window_w, (void)window_h;
+    switch (e->type)
+    {
+    case SDL_EVENT_FINGER_DOWN:
+    case SDL_EVENT_FINGER_UP:
+    case SDL_EVENT_FINGER_MOTION:
+    case SDL_EVENT_FINGER_CANCELED:
+        touch(NULL, e);
+        return 1;
+    case SDL_EVENT_MOUSE_MOTION:
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+        return !keep_event(NULL, e);
+    default:
+        return 0;
+    }
+}
+#endif
+
 void ios_touch_init(void)
 {
     load_style();
     g_lock = SDL_CreateMutex();
+#if defined(__ANDROID__)
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+    user32_event_hook = touch_hook;
+#else
     SDL_SetEventFilter(keep_event, NULL);
     SDL_AddEventWatch(touch, NULL);
+#endif
 }

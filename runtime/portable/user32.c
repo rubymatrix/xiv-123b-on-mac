@@ -851,6 +851,9 @@ static void apply_frame(Wnd* w)
     uint32_t dw, dh, hz;
     user32_desktop_mode(&dw, &dh, &hz);
     int cover = popup && (uint32_t)w->w >= dw && (uint32_t)w->h >= dh, full = cover || w->fullscreen;
+#if defined(__ANDROID__)
+    full = 1; /* the game's window is the screen, whatever its mode: immersive, no system bars over it */
+#endif
     /* a macOS Space is only for a window with a frame: full screen hides it anyway */
     int spaces = SDL_GetHintBoolean(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, false);
     SDL_SetWindowBordered(w->sdl, !popup || (full && spaces));
@@ -952,6 +955,9 @@ static void sh_CreateWindowExA(Guest* g)
     else
     {
         SDL_WindowFlags flags = SDL_WINDOW_HIDDEN;
+#if defined(__ANDROID__)
+        flags |= SDL_WINDOW_FULLSCREEN; /* Android's immersive mode: no status or navigation bar over the game */
+#endif
 #if defined(_WIN32)
         if (popup)
             flags |= SDL_WINDOW_BORDERLESS;

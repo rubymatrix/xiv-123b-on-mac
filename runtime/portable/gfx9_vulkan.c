@@ -96,7 +96,7 @@ static uint64_t now_ns(void)
     X(vkDestroyBuffer) X(vkGetBufferMemoryRequirements) X(vkBindBufferMemory) X(vkCreateImage) X(vkDestroyImage) \
     X(vkGetImageMemoryRequirements) X(vkBindImageMemory) X(vkCreateImageView) X(vkDestroyImageView)              \
     X(vkCreateSampler) X(vkCreateShaderModule) X(vkCreatePipelineCache) X(vkGetPipelineCacheData)                \
-    X(vkCreatePipelineLayout) X(vkCreateGraphicsPipelines) X(vkCreateDescriptorSetLayout)                        \
+    X(vkCreatePipelineLayout) X(vkCreateGraphicsPipelines) X(vkDestroyPipeline) X(vkCreateDescriptorSetLayout)   \
     X(vkCreateDescriptorPool) X(vkResetDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets)     \
     X(vkCreateRenderPass) X(vkCreateFramebuffer) X(vkDestroyFramebuffer) X(vkCmdBeginRenderPass)                 \
     X(vkCmdEndRenderPass) X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdBindVertexBuffers)              \
@@ -3199,12 +3199,14 @@ static VkShaderModule util_module(const char* src, int pixel)
     return m;
 }
 
-static VkPipeline util_pipeline(VkRenderPass rp)
+/* a full-screen-quad pipeline in rp: its shaders, layout and blending (NULL: none) */
+static VkPipeline util_pipeline_ex(VkRenderPass rp, VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout,
+    const VkPipelineColorBlendAttachmentState* blend)
 {
     VkPipelineShaderStageCreateInfo st[2] = { { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
                                               { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO } };
-    st[0].stage = VK_SHADER_STAGE_VERTEX_BIT, st[0].module = g_util_vs, st[0].pName = "main";
-    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT, st[1].module = g_util_fs, st[1].pName = "main";
+    st[0].stage = VK_SHADER_STAGE_VERTEX_BIT, st[0].module = vs, st[0].pName = "main";
+    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT, st[1].module = fs, st[1].pName = "main";
     VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
     VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
@@ -3218,7 +3220,7 @@ static VkPipeline util_pipeline(VkRenderPass rp)
     ca.colorWriteMask = 15;
     VkPipelineColorBlendStateCreateInfo bs = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
     bs.attachmentCount = 1;
-    bs.pAttachments = &ca;
+    bs.pAttachments = blend ? blend : &ca;
     VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
     VkPipelineDynamicStateCreateInfo dy = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
     dy.dynamicStateCount = 2;
@@ -3233,12 +3235,16 @@ static VkPipeline util_pipeline(VkRenderPass rp)
     pi.pMultisampleState = &ms;
     pi.pColorBlendState = &bs;
     pi.pDynamicState = &dy;
-    pi.layout = g_util_playout;
+    pi.layout = layout;
     pi.renderPass = rp;
     VkPipeline p = VK_NULL_HANDLE;
     vkCreateGraphicsPipelines(g_dev, g_pcache, 1, &pi, NULL, &p);
     return p;
 }
+
+static VkPipeline util_pipeline(VkRenderPass rp) { return util_pipeline_ex(rp, g_util_vs, g_util_fs, g_util_playout, NULL); }
+
+#include "gfx9_touch_vk.h" /* tests/ios_touch.c's controls */
 
 static void swap_destroy(void)
 {
@@ -3429,6 +3435,7 @@ void g9_present(G9Tex* bb)
     }
     if (bb)
         tex_prepare(bb);
+    int touch = touch_count() > 0 && touch_ready(g_present_rp);
     VkClearValue cv = { { { 0, 0, 0, 1 } } };
     VkRenderPassBeginInfo bi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
     bi.renderPass = g_present_rp;
@@ -3459,6 +3466,13 @@ void g9_present(G9Tex* bb)
         float pc[8] = { -qw, -qh, qw, qh, 0, 0, 1, 1 };
         vkCmdPushConstants(cb, g_util_playout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof pc, pc);
         vkCmdDraw(cb, 4, 1, 0, 0);
+    }
+    if (touch)
+    {
+        /* the shapes come in the window's pixels (ios_touch.c's points times its density) */
+        int pw = 0, ph = 0;
+        SDL_GetWindowSizeInPixels((SDL_Window*)g_sdl_window, &pw, &ph);
+        draw_touch(cb, g_swap_extent.width, g_swap_extent.height, pw > 0 ? (float)g_swap_extent.width / (float)pw : 1.0f);
     }
     vkCmdEndRenderPass(cb);
     reset_bound_state();

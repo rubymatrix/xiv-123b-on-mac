@@ -130,7 +130,7 @@ def lib(exe):
         host += ['runtime/portable/gfx9_null.c']
     objs += compile_all(portable + host, 'runtime', ours)
     objs += compile_all(['tests/xivboot.c'], 'xivboot', ours + ['-Dmain=xivboot_main'])
-    objs += compile_all(['tests/xivboot_android.c'], 'entry', ours)
+    objs += compile_all(['tests/xivboot_android.c', 'tests/ios_touch.c'], 'entry', ours)
     out = os.path.join(OUT, 'libmain.so')
     cache = os.path.join(OUT, 'lto-cache')
     build_xiv.run_lto([CC, '-shared', '-o', out, '-flto=thin', '-O3', CPU, '-fPIC', '-Wl,-soname,libmain.so',
