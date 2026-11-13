@@ -3,8 +3,8 @@
   python3 tools/xiv_sample.py <samples.bin> [--binary build/xivboot] [--top 40] [--skip-seconds 0]
 
 Samples are (uint64 pc, uint64 lr, uint32 tid, pad) from runtime/portable/sampler_posix.c. PCs are
-mapped to symbols with `nm -n` (the executable's load slide is found from main's address, which
-xivboot logs as "[sample] main at 0x...").
+mapped to symbols with `nm -n` (the executable's load slide is found from sampler_start's address, which
+xivboot logs as "[sample] ... sampler_start at 0x...").
 """
 import argparse
 import bisect
@@ -26,6 +26,26 @@ def symbols(binary):
     return addrs, names
 
 
+def text_end(binary):
+    """The end of the code section: Mach-O's __text (otool), or an ELF's .text (Android's libmain.so)."""
+    with open(binary, 'rb') as f:
+        head = f.read(64)
+        if head[:4] == b'\x7fELF':
+            shoff, = struct.unpack_from('<Q', head, 0x28)
+            shentsize, shnum, shstrndx = struct.unpack_from('<HHH', head, 0x3A)
+            f.seek(shoff)
+            secs = [struct.unpack_from('<IIQQQQ', f.read(shentsize)) for _ in range(shnum)]
+            f.seek(secs[shstrndx][4])
+            strtab = f.read(secs[shstrndx][5])
+            for name, _type, _flags, addr, _off, size in secs:
+                if strtab[name:strtab.index(b'\0', name)] == b'.text':
+                    return addr + size
+            raise SystemExit('no .text in ' + binary)
+    out = subprocess.run(['sh', '-c', "otool -l %s | awk '/sectname __text/{f=1} f&&/addr/{a=$2} f&&/size/{print a\" \"$2; exit}'" % binary],
+                         capture_output=True, text=True).stdout.split()
+    return int(out[0], 16) + int(out[1], 16)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('samples')
@@ -36,10 +56,7 @@ def main():
     ap.add_argument('--after', type=float, default=0, help='only samples this many seconds after launch')
     a = ap.parse_args()
     addrs, names = symbols(a.binary)
-    end = int(subprocess.run(['sh', '-c', "otool -l %s | awk '/sectname __text/{f=1} f&&/addr/{a=$2} f&&/size/{print a\" \"$2; exit}'" % a.binary],
-                             capture_output=True, text=True).stdout.split()[0], 16)
-    end += int(subprocess.run(['sh', '-c', "otool -l %s | awk '/sectname __text/{f=1} f&&/size/{print $2; exit}'" % a.binary],
-                              capture_output=True, text=True).stdout.split()[0], 16)
+    end = text_end(a.binary)
     data = open(a.samples, 'rb').read()
     n = len(data) // 72
     by_fn = collections.Counter()

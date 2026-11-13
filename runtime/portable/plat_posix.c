@@ -72,7 +72,12 @@ uint32_t plat_thread_id(void)
     pthread_threadid_np(NULL, &id);
     return (uint32_t)id;
 #else
-    return (uint32_t)syscall(SYS_gettid);
+    /* gettid is a system call, and the runtime asks often (on Android it was a tenth of the game's
+     * time in the world): once a thread */
+    static __thread uint32_t id;
+    if (!id)
+        id = (uint32_t)syscall(SYS_gettid);
+    return id;
 #endif
 }
 
