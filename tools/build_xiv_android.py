@@ -1,7 +1,7 @@
 """Build FINAL FANTASY XIV 1.23b for Android (ARM64) with the NDK: libmain.so, then an APK, and put it on
 a device with adb. See docs/android-port.md.
 
-  python3 tools/android_deps.py                       SDL3 for Android, once
+  python3 tools/android_deps.py                       SDL3 and glslang for Android, once
   python3 tools/build_xiv_android.py lib --exe <ffxivgame.exe>
         the translation (generated/ffxivgame, as the Mac's), the runtime and tests/xivboot_android.c
         into build/android/libmain.so
@@ -12,7 +12,8 @@ a device with adb. See docs/android-port.md.
   python3 tools/build_xiv_android.py run [--args <run.args file>]    start it (run.args sent first)
   python3 tools/build_xiv_android.py log               the app's xivboot.log
 
-The renderer is gfx9_null.c (nothing drawn) until the Vulkan one (docs/android-port.md, milestone 2).
+The renderer is gfx9_vulkan.c, its shaders from sm_glsl.c through glslang (docs/android-port.md,
+milestone 2). XIV_GFX=null builds with gfx9_null.c instead, which draws nothing.
 XIV_ANDROID_GUEST_BASE=<hex>|none: the guest window's fixed address (default build_xiv.py's); none
 builds without RT_GUEST_FIXED.
 """
@@ -41,6 +42,12 @@ CPU = '-march=armv8.2-a'  # every phone of the last years (the Pixel 6a's X1 and
 NATIVE = ['-fPIC', '-ffixed-x18']  # Android keeps x18 (the shadow call stack)
 SDL_INCLUDE = str(SDL / 'include')
 SDL_LIB = str(CACHE / 'sdl-build')
+GLSLANG = CACHE / 'glslang-install'  # android_deps.py
+VULKAN = os.environ.get('XIV_GFX') != 'null'
+BACKENDS = ('runtime/portable/gfx9_null.c', 'runtime/portable/gfx9_vulkan.c', 'runtime/portable/sm_glsl.c')
+# glslang's static libraries, users before what they use
+GLSLANG_LIBS = ['-lglslang', '-lglslang-default-resource-limits', '-lMachineIndependent', '-lGenericCodeGen',
+                '-lOSDependent', '-lSPIRV', '-lSPIRV-Tools-opt', '-lSPIRV-Tools']
 
 
 def run(cmd, **kw):
@@ -111,9 +118,16 @@ def lib(exe):
     gen = sorted(os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, build_xiv.GEN, '*.c')))
     gen_flags = [CPU if f.startswith('-mcpu=') else f for f in build_xiv.GEN_FLAGS]
     objs = compile_all(gen, 'gen', cflags() + gen_flags)
+    if VULKAN and not (GLSLANG / 'lib' / 'libglslang.a').exists():
+        raise SystemExit('glslang for Android is not built: python3 tools/android_deps.py')
     ours = cflags() + ['-I', SDL_INCLUDE, '-I', 'tests']
     portable = [s for s in build_xiv.PORTABLE if not s.endswith('.m')]  # app_icon.m: the Mac's Dock
-    host = [s for s in build_xiv.HOST if not s.endswith('.m')] + ['runtime/portable/gfx9_null.c']
+    host = [s for s in build_xiv.HOST if not s.endswith('.m') and s not in BACKENDS]
+    if VULKAN:
+        host += ['runtime/portable/sm_glsl.c', 'runtime/portable/gfx9_vulkan.c']
+        ours += ['-I', str(GLSLANG / 'include')]
+    else:
+        host += ['runtime/portable/gfx9_null.c']
     objs += compile_all(portable + host, 'runtime', ours)
     objs += compile_all(['tests/xivboot.c'], 'xivboot', ours + ['-Dmain=xivboot_main'])
     objs += compile_all(['tests/xivboot_android.c'], 'entry', ours)
@@ -122,7 +136,9 @@ def lib(exe):
     build_xiv.run_lto([CC, '-shared', '-o', out, '-flto=thin', '-O3', CPU, '-fPIC', '-Wl,-soname,libmain.so',
                        '-Wl,-z,max-page-size=16384', '-Wl,--no-undefined', '-Wl,--thinlto-cache-dir=' + cache,
                        '-Wl,--thinlto-jobs=%d' % (os.cpu_count() or 4)]
-                      + objs + ['-L' + SDL_LIB, '-lSDL3', '-llog', '-landroid', '-lm', '-ldl'],
+                      + objs + ['-L' + SDL_LIB, '-lSDL3']
+                      + (['-L' + str(GLSLANG / 'lib')] + GLSLANG_LIBS + ['-lvulkan', '-l:libc++_static.a', '-l:libc++abi.a'] if VULKAN else [])
+                      + ['-llog', '-landroid', '-lm', '-ldl'],
                       os.path.relpath(cache, ROOT), len(gen))
     print('built %s' % out)
 

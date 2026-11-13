@@ -1109,6 +1109,15 @@ static int extra_needed(const Ctx* c, const SmDecl* d)
     return !(d->usage == SM_POSITION && d->index == 0) && d->usage != SM_PSIZE;
 }
 
+/* "vec4 name[n] = vec4[n](vec4(0.0), ...);": a register array set to zero by its constructor rather
+ * than a loop, so the compiler can keep it in registers (spirv-opt does not unroll a loop) */
+static void zero_array(Ctx* c, const char* name, unsigned n)
+{
+    emit(c, "    vec4 %s[%u] = vec4[%u](", name, n, n);
+    for (unsigned i = 0; i < n; ++i)
+        emit(c, i + 1 < n ? "vec4(0.0), " : "vec4(0.0));\n");
+}
+
 static void vertex_program(Ctx* c)
 {
     SmInfo* info = c->info;
@@ -1159,12 +1168,13 @@ static void vertex_program(Ctx* c)
     emit(c, "#ifndef SM_NO_CLIP_DISTANCE\nout float gl_ClipDistance[6];\n#endif\n\n");
 
     emit(c, "void main()\n{\n");
-    emit(c, "    vec4 r[32], v[16], o[16];\n");
-    emit(c, "    for (int i = 0; i < 32; ++i) r[i] = vec4(0.0);\n");
-    emit(c, "    for (int i = 0; i < 16; ++i) v[i] = o[i] = vec4(0.0);\n");
+    zero_array(c, "r", 32);
+    zero_array(c, "v", 16);
+    zero_array(c, "o", 16);
+    zero_array(c, "oD", 2);
+    zero_array(c, "oT", 8);
     emit(c, "    ivec4 a0 = ivec4(0); vec4 a0f = vec4(0.0); int aL = 0; bvec4 p0 = bvec4(false);\n");
-    emit(c, "    vec4 oPos = vec4(0.0, 0.0, 0.0, 1.0), oD[2], oT[8]; float oFog = 0.0, oPts = 1.0;\n");
-    emit(c, "    oD[0] = oD[1] = vec4(0.0);\n    for (int i = 0; i < 8; ++i) oT[i] = vec4(0.0);\n");
+    emit(c, "    vec4 oPos = vec4(0.0, 0.0, 0.0, 1.0); float oFog = 0.0, oPts = 1.0;\n");
     for (unsigned r = 0; r < 16; ++r)
     {
         if (!c->in_used[r])
@@ -1227,10 +1237,10 @@ static void vertex_program(Ctx* c)
             if (extra_needed(c, d))
                 emit(c, "    o_%s = vec4(0.0);\n", semantic(d->usage, d->index, name));
         }
-    emit(c, "#ifndef SM_NO_CLIP_DISTANCE\n"
-            "    for (int i = 0; i < 6; ++i)\n"
-            "        gl_ClipDistance[i] = ((aux.clip_on.x >> uint(i)) & 1u) != 0u ? dot(pos, aux.clip[i]) : 1.0;\n"
-            "#endif\n");
+    emit(c, "#ifndef SM_NO_CLIP_DISTANCE\n");
+    for (int i = 0; i < 6; ++i)
+        emit(c, "    gl_ClipDistance[%d] = (aux.clip_on.x & %uu) != 0u ? dot(pos, aux.clip[%d]) : 1.0;\n", i, 1u << i, i);
+    emit(c, "#endif\n");
     /* D3D9's pixel centres: the half-pixel shift Direct3D 10+ and Vulkan do not have; then Vulkan's
      * clip space, whose y points down */
     emit(c, "    pos.xy += aux.half_pixel.xy * pos.w;\n");
@@ -1283,11 +1293,11 @@ static void pixel_program(Ctx* c)
         emit(c, "layout(location = 0) out vec4 out_c0;\n");
     int depth_out = info->writes_depth && !(c->opts && c->opts->no_depth_out);
     emit(c, "\nvoid main()\n{\n");
-    emit(c, "    vec4 r[32], v[16], tc[8], oC[4]; float oDepth = gl_FragCoord.z;\n");
-    emit(c, "    for (int i = 0; i < 32; ++i) r[i] = vec4(0.0);\n");
-    emit(c, "    for (int i = 0; i < 16; ++i) v[i] = vec4(0.0);\n");
-    emit(c, "    for (int i = 0; i < 8; ++i) tc[i] = vec4(0.0);\n");
-    emit(c, "    for (int i = 0; i < 4; ++i) oC[i] = vec4(0.0);\n");
+    zero_array(c, "r", 32);
+    zero_array(c, "v", 16);
+    zero_array(c, "tc", 8);
+    zero_array(c, "oC", 4);
+    emit(c, "    float oDepth = gl_FragCoord.z;\n");
     emit(c, "    int aL = 0; bvec4 p0 = bvec4(false); ivec4 a0 = ivec4(0);\n");
     if (c->vpos)
         emit(c, "    vec4 vpos = vec4(gl_FragCoord.xy * aux.rscale.xy - 0.5, 0.0, 0.0);\n");

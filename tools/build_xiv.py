@@ -69,6 +69,15 @@ HOST = ['runtime/portable/user32.c', 'runtime/portable/input.c', 'runtime/portab
 if os.environ.get('XIV_GFX') == 'null':
     HOST = [s for s in HOST if s != 'runtime/portable/gfx9_metal.m'] + ['runtime/portable/gfx9_null.c']
 GFX_LIBS = ['-framework', 'Metal', '-framework', 'QuartzCore', '-framework', 'Foundation', '-weak_framework', 'MetalFX']
+GFX_CFLAGS = []  # for the runtime's objects only, so changing back ends leaves the translated game's alone
+# XIV_GFX=vulkan: the Vulkan back end (gfx9_vulkan.c, shaders by sm_glsl.c and glslang) on MoltenVK, as
+# Android will run it; the loader, MoltenVK and glslang from Homebrew
+# (brew install molten-vk vulkan-loader vulkan-headers glslang)
+if os.environ.get('XIV_GFX') == 'vulkan':
+    BREW = os.environ.get('HOMEBREW_PREFIX', '/opt/homebrew')
+    HOST = [s for s in HOST if s != 'runtime/portable/gfx9_metal.m'] + ['runtime/portable/sm_glsl.c', 'runtime/portable/gfx9_vulkan.c']
+    GFX_CFLAGS = ['-idirafter', BREW + '/include']
+    GFX_LIBS += ['-L' + BREW + '/lib', '-lvulkan', '-lglslang', '-lglslang-default-resource-limits']
 # the game opened from Finder: its folder and the sign-in window (tests/mac_signin.m), with ARC
 SIGNIN = ['tests/mac_signin.m', 'tests/signin_core.m', 'tests/xiv_args.c']
 SIGNIN_LIBS = ['-framework', 'AppKit', '-framework', 'Security']
@@ -204,7 +213,7 @@ def xivboot(exe, run_it, extra, debug=False, opt='-O1', pgo=None):
         # binary's debug map points at them, so no dsymutil step is needed.
         objs = compile_stale(gen, 'build/xiv-dbg/gen', gen_flags=[opt, '-g', '-mcpu=apple-m1', '-w'])
         thirdparty.build('sdl3')
-        objs += compile_stale(PORTABLE + HOST + ['tests/xivboot.c'], 'build/xiv-dbg/obj', thirdparty.flags('sdl3'))
+        objs += compile_stale(PORTABLE + HOST + ['tests/xivboot.c'], 'build/xiv-dbg/obj', thirdparty.flags('sdl3') + GFX_CFLAGS)
         objs += compile_stale(SIGNIN, 'build/xiv-dbg/signin', ['-fobjc-arc', '-I', 'tests'])
         run(['clang', '-o', 'build/xivboot-dbg', '-g', '-mcpu=apple-m1']
             + objs + thirdparty.libs('sdl3') + GFX_LIBS + SIGNIN_LIBS + ['-lm', '-lpthread'])
@@ -228,7 +237,7 @@ def xivboot(exe, run_it, extra, debug=False, opt='-O1', pgo=None):
         pgo_flags, gendir = ['-fprofile-use=' + prof, '-Wno-profile-instr-out-of-date', '-Wno-profile-instr-unprofiled'], 'build/xiv-pgouse/gen'
     objs = compile_stale(gen, gendir, gen_flags=GEN_FLAGS + pgo_flags)
     thirdparty.build('sdl3')
-    objs += compile_stale(PORTABLE + HOST + ['tests/xivboot.c'], 'build/xiv/obj', thirdparty.flags('sdl3'))
+    objs += compile_stale(PORTABLE + HOST + ['tests/xivboot.c'], 'build/xiv/obj', thirdparty.flags('sdl3') + GFX_CFLAGS)
     objs += compile_stale(SIGNIN, 'build/xiv/signin', ['-fobjc-arc', '-I', 'tests'])
     # ThinLTO: the translated functions call each other across 291 files; inlining the small ones
     # into their callers needs the whole program (cache: relinks reuse unchanged modules)

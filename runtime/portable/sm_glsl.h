@@ -54,8 +54,9 @@
  * D3DCULL_CW culls VK_CULL_MODE_FRONT_BIT, D3DCULL_CCW VK_CULL_MODE_BACK_BIT, as on Metal.
  *
  * sRGB and blending are not in the shaders: as on Metal, a sampler with D3DSAMP_SRGBTEXTURE reads
- * through an sRGB view of the image and D3DRS_SRGBWRITEENABLE draws through an sRGB view of the
- * target. The alpha test is (SmOpts.alpha_func, SmAux.alpha_ref).
+ * through an sRGB view of the image. D3DRS_SRGBWRITEENABLE is not applied: gfx9_metal.m keys its
+ * pipelines by it but draws to the plain target, and gfx9_vulkan.c does the same. The alpha test is
+ * (SmOpts.alpha_func, SmAux.alpha_ref).
  *
  * User clip planes write gl_ClipDistance[6], which wants the shaderClipDistance feature. Compiling
  * the vertex shaders with SM_NO_CLIP_DISTANCE defined (glslangValidator -DSM_NO_CLIP_DISTANCE)
