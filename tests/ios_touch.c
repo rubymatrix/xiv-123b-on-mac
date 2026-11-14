@@ -4,7 +4,9 @@
  * The gamepad is SDL's virtual one: the game sees an Xbox 360 pad like any other (input.c, dinput.c),
  * the first pad config.pad names. Drawn by the Metal back end (gfx9_touch.h, gfx_set_touch_shapes):
  *   - the left stick floats: it starts where the thumb lands in the lower left, and moves the player
- *   - a drag anywhere else on the game turns the camera (the right stick, from where the finger landed)
+ *   - a drag anywhere else on the game turns the camera (the right stick, from where the finger landed);
+ *     the right stick's own ring, left of the face buttons, floats as the left's does
+ *   - L3 and R3, pressing the sticks in, a pill above each
  *   - the face buttons (PlayStation's shapes, as FFXI's console pads), the D-pad, L1/R1, L2/R2 (the
  *     macro palette), SELECT and START
  *   - a quick tap that is not on a control is a click where it landed, for the game's menus and targets
@@ -64,6 +66,7 @@ enum Ctl
 {
     C_NONE,
     C_STICK,
+    C_RSTICK, /* the right stick's ring: the camera, as a drag on the game also turns it */
     C_LOOK,
     C_BUTTON, /* + the gamepad button: btn */
     C_TRIGGER,
@@ -85,6 +88,7 @@ enum Group
     G_LEFT, /* L1, L2 */
     G_RIGHT,
     G_MENU, /* SELECT, START */
+    G_RSTICK, /* last: a saved layout's groups keep their numbers */
     G_COUNT,
 };
 
@@ -110,6 +114,7 @@ static float g_density = 1.0f;   /* the window's pixels a point */
  * in points: what comes from SDL is divided by it, what goes back multiplied. */
 static float g_u = 1.0f;
 static float g_stick_x, g_stick_y; /* the stick's resting place */
+static float g_rstick_x, g_rstick_y; /* the right stick's, left of the face buttons */
 static int g_editing;            /* the layout is being edited (the toggle held) */
 static int g_group;              /* the group add() puts controls in */
 static float g_off[G_COUNT][2];  /* each group's move from its place, in fractions of the safe area */
@@ -295,17 +300,28 @@ static void add(enum Ctl ctl, int btn, int kind, int sym, const char* label, flo
 
 /* --- the edited layouts: Documents/touch-layout.txt, a line a group moved: "<shape> <group> <dx> <dy>",
  * the move in fractions of the safe area, a layout for each shape of window (a phone's, an iPad's) */
+/* a file of the controls' own: in Documents on iOS (where the Files app shows it), in the app's files folder
+ * on Android (there is no Documents folder there, and a layout written to one was lost at every start) */
+static void own_path(const char* name, char* out, size_t n)
+{
+#if defined(__ANDROID__)
+    const char* dir = SDL_GetAndroidExternalStoragePath();
+    snprintf(out, n, "%s/%s", dir ? dir : ".", name);
+#else
+    const char* home = getenv("HOME");
+    snprintf(out, n, "%s/Documents/%s", home ? home : ".", name);
+#endif
+}
+
 static void layout_path(char* out, size_t n)
 {
-    const char* home = getenv("HOME");
-    snprintf(out, n, "%s/Documents/touch-layout.txt", home ? home : ".");
+    own_path("touch-layout.txt", out, n);
 }
 
 /* the controls' look, kept across runs: Documents/touch-style.txt, "bold" for high contrast */
 static void style_path(char* out, size_t n)
 {
-    const char* home = getenv("HOME");
-    snprintf(out, n, "%s/Documents/touch-style.txt", home ? home : ".");
+    own_path("touch-style.txt", out, n);
 }
 
 static void load_style(void)
@@ -414,6 +430,7 @@ static void layout(SDL_Window* win, int controls)
         float cy = sy + sh - sh * TALL_FOOT;
         fx = sx + sw - FACE_GAP - FACE - 60, fy = cy;
         g_stick_x = sx + STICK + 70, g_stick_y = cy;
+        g_rstick_x = fx - FACE_GAP - FACE - 40 - STICK, g_rstick_y = cy;
         dx = g_stick_x, dy = cy - STICK - 40 - DPAD_GAP - DPAD;
         ly = dy - DPAD_GAP - DPAD - 24 - PILL_H, l2x = dx - PILL_W - 8, l1x = dx + PILL_W + 8;
         ry = fy - FACE_GAP - FACE - 10 - 3 * PILL_H - 16, r1x = fx - PILL_W - 8, r2x = fx + PILL_W + 8;
@@ -423,6 +440,7 @@ static void layout(SDL_Window* win, int controls)
     {
         fx = sx + sw - FACE_GAP - FACE - 18, fy = sy + sh - FACE_GAP - FACE - 14;
         g_stick_x = sx + STICK + 26, g_stick_y = sy + sh - STICK - 18;
+        g_rstick_x = fx - FACE_GAP - FACE - 24 - STICK, g_rstick_y = g_stick_y;
         dx = sx + DPAD_GAP + DPAD + 18, dy = top + PILL_H + 14 + DPAD_GAP + DPAD;
         ly = ry = sel_y = top;
         l2x = left + 16 + PILL_W, l1x = left + 28 + 3 * PILL_W;
@@ -460,6 +478,15 @@ static void layout(SDL_Window* win, int controls)
     }
     g_stick_x = SDL_clamp(g_stick_x + g_off[G_STICK][0] * sw, (float)STICK, (float)w - STICK);
     g_stick_y = SDL_clamp(g_stick_y + g_off[G_STICK][1] * sh, (float)STICK, (float)h - STICK);
+    g_rstick_x = SDL_clamp(g_rstick_x + g_off[G_RSTICK][0] * sw, (float)STICK, (float)w - STICK);
+    g_rstick_y = SDL_clamp(g_rstick_y + g_off[G_RSTICK][1] * sh, (float)STICK, (float)h - STICK);
+    /* pressing the sticks in (L3, R3): a pill above each, moving with it */
+    g_group = G_STICK;
+    add(C_BUTTON, SDL_GAMEPAD_BUTTON_LEFT_STICK, GFX_TOUCH_PILL, 0, "L3", g_stick_x, g_stick_y - STICK - 12 - PILL_H,
+        PILL_W, PILL_H);
+    g_group = G_RSTICK;
+    add(C_BUTTON, SDL_GAMEPAD_BUTTON_RIGHT_STICK, GFX_TOUCH_PILL, 0, "R3", g_rstick_x, g_rstick_y - STICK - 12 - PILL_H,
+        PILL_W, PILL_H);
     if (g_editing) /* Reset and Done, in the middle */
     {
         g_group = G_NONE;
@@ -486,7 +513,10 @@ static int group_at(float x, float y)
             return g;
     }
     float dx = x - g_stick_x, dy = y - g_stick_y;
-    return dx * dx + dy * dy <= STICK * STICK ? G_STICK : G_NONE;
+    if (dx * dx + dy * dy <= STICK * STICK)
+        return G_STICK;
+    dx = x - g_rstick_x, dy = y - g_rstick_y;
+    return dx * dx + dy * dy <= STICK * STICK ? G_RSTICK : G_NONE;
 }
 
 static int hit(float x, float y)
@@ -507,6 +537,14 @@ static int stick_zone(float x, float y, int w, int h)
     (void)w, (void)h;
     float dx = x - g_stick_x, dy = y - g_stick_y;
     return dx * dx + dy * dy <= (STICK * 2.2f) * (STICK * 2.2f);
+}
+
+/* where the right stick floats from: closer around its resting place than the left's (the face buttons
+ * are beside it, and the rest of the game is the camera's drag) */
+static int rstick_zone(float x, float y)
+{
+    float dx = x - g_rstick_x, dy = y - g_rstick_y;
+    return dx * dx + dy * dy <= (STICK * 1.5f) * (STICK * 1.5f);
 }
 
 /* --- fingers ------------------------------------------------------------------------------------- */
@@ -610,6 +648,13 @@ static void sticks(void)
                 dx *= STICK / len, dy *= STICK / len;
             lx = dx / STICK, ly = dy / STICK;
         }
+        else if (f->what == C_RSTICK)
+        {
+            float len = sqrtf(dx * dx + dy * dy);
+            if (len > STICK)
+                dx *= STICK / len, dy *= STICK / len;
+            rx = dx / STICK, ry = dy / STICK;
+        }
         else if (f->what == C_LOOK)
             rx = dx / LOOK, ry = dy / LOOK;
     }
@@ -644,7 +689,7 @@ static void finger_down(const SDL_TouchFingerEvent* e, float x, float y, int w, 
             press(i, 1, e->windowID);
     }
     else if (g_shown)
-        f->what = stick_zone(x, y, w, h) ? C_STICK : C_LOOK;
+        f->what = stick_zone(x, y, w, h) ? C_STICK : rstick_zone(x, y) ? C_RSTICK : C_LOOK;
 }
 
 /* a finger moved (g_lock held): a dragged group follows it, a stick finger moves its stick */
@@ -657,7 +702,7 @@ static void finger_moved(Finger* f, float x, float y)
         g_off[f->group][1] = f->oy + (y - f->y0) / g_safe.h;
         layout(g_win, 1);
     }
-    else if (f->what == C_STICK || f->what == C_LOOK)
+    else if (f->what == C_STICK || f->what == C_RSTICK || f->what == C_LOOK)
         sticks();
 }
 
@@ -711,7 +756,7 @@ static void finger_up(const SDL_TouchFingerEvent* e, Finger* f, float x, float y
     }
     if (f->ctl >= 0)
         press(f->ctl, 0, e->windowID);
-    else if ((f->what == C_STICK || f->what == C_LOOK) && e->timestamp - f->t0 < TAP_NS &&
+    else if ((f->what == C_STICK || f->what == C_RSTICK || f->what == C_LOOK) && e->timestamp - f->t0 < TAP_NS &&
              fabsf(x - f->x0) < TAP_MOVE && fabsf(y - f->y0) < TAP_MOVE)
         click(e->windowID, x, y); /* a tap on the game: its menus, its targets */
     memset(f, 0, sizeof *f);
@@ -868,6 +913,7 @@ static void draw(void)
     float d = g_density;
     int pressed[GFX_TOUCH_MAX] = { 0 }, dragged = G_NONE;
     const Finger* stick = NULL;
+    const Finger* rstick = NULL;
     for (int i = 0; i < 10; ++i)
     {
         if (g_fingers[i].id && g_fingers[i].ctl >= 0)
@@ -876,11 +922,13 @@ static void draw(void)
             dragged = g_fingers[i].group;
         if (g_fingers[i].id && g_fingers[i].what == C_STICK)
             stick = &g_fingers[i];
+        if (g_fingers[i].id && g_fingers[i].what == C_RSTICK)
+            rstick = &g_fingers[i];
     }
     /* dimmed while iOS's keyboard is up: it covers the lower half, and typing is what is wanted */
     SDL_Window* focus = SDL_GetKeyboardFocus();
     float fade = focus && SDL_ScreenKeyboardShown(focus) ? 0.15f : 1.0f;
-    for (int i = 0; i < g_nctl && n < GFX_TOUCH_MAX - 2; ++i)
+    for (int i = 0; i < g_nctl && n < GFX_TOUCH_MAX - 4; ++i)
     {
         const Control* c = &g_ctl[i];
         GfxTouchShape* t = &s[n++];
@@ -895,21 +943,26 @@ static void draw(void)
     }
     if (g_shown)
     {
-        /* the stick: where the thumb landed while it is down, else at rest, fainter */
-        float bx = stick ? stick->x0 : g_stick_x, by = stick ? stick->y0 : g_stick_y, kx = bx, ky = by;
-        if (stick)
+        /* the sticks: each where its thumb landed while it is down, else at rest, fainter */
+        for (int side = 0; side < 2; ++side)
         {
-            float dx = stick->x - bx, dy = stick->y - by, len = sqrtf(dx * dx + dy * dy);
-            if (len > STICK)
-                dx *= STICK / len, dy *= STICK / len;
-            kx += dx, ky += dy;
+            const Finger* st = side ? rstick : stick;
+            float rest_x = side ? g_rstick_x : g_stick_x, rest_y = side ? g_rstick_y : g_stick_y;
+            float bx = st ? st->x0 : rest_x, by = st ? st->y0 : rest_y, kx = bx, ky = by;
+            if (st)
+            {
+                float dx = st->x - bx, dy = st->y - by, len = sqrtf(dx * dx + dy * dy);
+                if (len > STICK)
+                    dx *= STICK / len, dy *= STICK / len;
+                kx += dx, ky += dy;
+            }
+            float a = (st ? 0.9f : g_bold ? 0.85f : 0.5f) * fade;
+            if (g_editing)
+                a = 0.7f + 0.25f * sinf((float)SDL_GetTicks() / 160.0f);
+            int bold = g_bold ? 2 : 0;
+            s[n++] = (GfxTouchShape){ bx * d, by * d, STICK * d, STICK * d, GFX_TOUCH_RING, 0, bold, a, "" };
+            s[n++] = (GfxTouchShape){ kx * d, ky * d, KNOB * d, KNOB * d, GFX_TOUCH_KNOB, 0, (st != NULL) | bold, a, "" };
         }
-        float a = (stick ? 0.9f : g_bold ? 0.85f : 0.5f) * fade;
-        if (g_editing)
-            a = 0.7f + 0.25f * sinf((float)SDL_GetTicks() / 160.0f);
-        int bold = g_bold ? 2 : 0;
-        s[n++] = (GfxTouchShape){ bx * d, by * d, STICK * d, STICK * d, GFX_TOUCH_RING, 0, bold, a, "" };
-        s[n++] = (GfxTouchShape){ kx * d, ky * d, KNOB * d, KNOB * d, GFX_TOUCH_KNOB, 0, (stick != NULL) | bold, a, "" };
     }
     gfx_set_touch_shapes(s, n);
 }
