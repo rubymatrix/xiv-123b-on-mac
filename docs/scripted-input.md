@@ -48,6 +48,7 @@ an appended line counts from when it is read (so `+0` means now).
 | `click X Y [left\|right\|middle] [hold_ms]` | move there and click |
 | `shot NAME` | back buffer to `<dir>/NAME.ppm` (`XIV_INPUT_SHOTS`, else the script's folder); `sips -s format png NAME.ppm --out NAME.png` |
 | `log TEXT` | `[input] <ms>: TEXT` in the client log (sync point for shell loops) |
+| `log bench start NAME`, `log bench stop` | every frame's time between the two: at the stop, `[bench] NAME: <frames> frames, <fps> fps, median <ms> ms, p95 <ms> ms, 1% low <fps> fps` in the log, and with `XIV_BENCH=<file>` each frame's time appended to that file as `NAME,<ms>` |
 | `quit` | exit the client |
 
 | `walkto X Z [tol] [timeout_ms] [Y]` | walk to world X,Z (default tol 1.0, timeout 60000; with Y, also within 1.2 of that height); see Navigation |

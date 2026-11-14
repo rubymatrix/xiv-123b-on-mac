@@ -1237,9 +1237,84 @@ static int busy_tick(uint64_t now)
 #undef PRESS
 }
 
+/* --- bench start <name> / bench stop: frame times between two points of a script -------------------------
+ * Every frame's time (present to present) while a bench runs; at its stop one line in the log,
+ *     [bench] <name>: <frames> frames, <avg> fps, median <ms> ms, p95 <ms> ms, 1% low <fps> fps
+ * and with XIV_BENCH=<file> each frame's time appended there as "<name>,<ms>" for comparing runs. */
+static struct
+{
+    int on;
+    char name[64];
+    float* ms;
+    uint32_t n, cap;
+    uint64_t last;
+} g_bench;
+
+static int bench_cmp(const void* a, const void* b)
+{
+    float x = *(const float*)a, y = *(const float*)b;
+    return x < y ? -1 : x > y;
+}
+
+static void bench_frame(void)
+{
+    uint64_t now = rt_monotonic_ns();
+    if (g_bench.on && g_bench.last)
+    {
+        if (g_bench.n == g_bench.cap)
+        {
+            uint32_t cap = g_bench.cap ? g_bench.cap * 2 : 4096;
+            float* m = (float*)realloc(g_bench.ms, cap * sizeof *m);
+            if (!m)
+                return;
+            g_bench.ms = m, g_bench.cap = cap;
+        }
+        g_bench.ms[g_bench.n++] = (float)((now - g_bench.last) / 1e6);
+    }
+    g_bench.last = now;
+}
+
+static void bench_command(const char* text)
+{
+    if (!strncasecmp(text, "bench start", 11))
+    {
+        const char* name = text + 11;
+        while (*name == ' ')
+            ++name;
+        snprintf(g_bench.name, sizeof g_bench.name, "%s", *name ? name : "bench");
+        g_bench.n = 0, g_bench.on = 1, g_bench.last = 0;
+        return;
+    }
+    if (strncasecmp(text, "bench stop", 10) || !g_bench.on)
+        return;
+    g_bench.on = 0;
+    uint32_t n = g_bench.n;
+    if (!n)
+    {
+        rt_log("[bench] %s: no frames\n", g_bench.name);
+        return;
+    }
+    const char* file = getenv("XIV_BENCH");
+    FILE* f = file && *file ? fopen(file, "a") : NULL;
+    double sum = 0;
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        sum += g_bench.ms[i];
+        if (f)
+            fprintf(f, "%s,%.3f\n", g_bench.name, g_bench.ms[i]);
+    }
+    if (f)
+        fclose(f);
+    qsort(g_bench.ms, n, sizeof *g_bench.ms, bench_cmp);
+    float median = g_bench.ms[n / 2], p95 = g_bench.ms[(uint32_t)(n * 0.95)], p99 = g_bench.ms[(uint32_t)(n * 0.99)];
+    rt_log("[bench] %s: %u frames, %.1f fps, median %.1f ms, p95 %.1f ms, 1%% low %.1f fps\n", g_bench.name, n,
+        n * 1000.0 / sum, median, p95, p99 > 0 ? 1000.0 / p99 : 0.0);
+}
+
 const char* autoinput_frame(void)
 {
     static int init;
+    bench_frame();
     if (!init)
     {
         init = 1;
@@ -1463,7 +1538,7 @@ const char* autoinput_frame(void)
             snprintf(g_shot_pending, sizeof g_shot_pending, "%s", a->text);
             shot = g_shot_pending;
             break;
-        case A_LOG: break;
+        case A_LOG: bench_command(a->text); break;
         case A_QUIT:
             rt_log("[input] %llu ms: quit\n", (unsigned long long)now);
             fflush(NULL);
