@@ -163,9 +163,12 @@ int main(int argc, char** argv)
      * hint it chose the phone's natural one (portrait), and the window came out 1080x2400 */
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     /* SDL's default on Android is AAudio's low-latency mode with buffers of a few milliseconds, which ran
-     * dry and crackled while the game was busy; 1024 frames is about 21 ms at 48 kHz. As a default-priority
+     * dry and crackled while the game was busy; 2048 frames is about 43 ms at 48 kHz (1024 still clicked now and then). As a default-priority
      * hint, the SDL_AUDIO_DEVICE_SAMPLE_FRAMES environment variable still overrides it. */
-    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "1024", SDL_HINT_DEFAULT);
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "2048", SDL_HINT_DEFAULT);
+    /* and AAudio's ordinary mode, not its low-latency one (SDL's default), whose small device buffers popped
+     * even with the larger stream: a game's sound gains nothing from the lower latency */
+    SDL_SetHintWithPriority(SDL_HINT_ANDROID_LOW_LATENCY_AUDIO, "0", SDL_HINT_DEFAULT);
     setenv("XIV_DOCUMENTS", files, 0); /* the game's My Games under the app's files */
     setenv("XIV_DISCORD", "log", 0); /* no Discord app: where the game is goes to the log ([state]) */
     screen_size();
