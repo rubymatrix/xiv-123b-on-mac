@@ -2942,6 +2942,69 @@ static void trace_draw(const G9Draw* d, const SmOpts* po, const PipeKey* k)
     g_trace_draw++;
 }
 
+/* --- XIV_VK_PASSCACHE=log: whether the small passes' draws repeat ------------------------------------------
+ * A measurement for a cache of their results: each draw into a target under 256 pixels wide gets a fingerprint
+ * of what decides its pixels (shaders, all their constants, the textures it samples and the pass that last
+ * wrote each, the samplers, the target and its level, the viewport and states), and every 300 frames the log
+ * says how many of a frame's matched the frame before's at the same place. */
+#define PC_MAX 512
+static int g_pc = -1;
+static uint64_t g_pc_cur[PC_MAX], g_pc_prev[PC_MAX];
+static uint64_t g_pc_part[PC_MAX][5], g_pc_prev_part[PC_MAX][5]; /* shaders, vs constants, ps constants, textures, the rest */
+static uint32_t g_pc_n, g_pc_prev_n;
+static uint64_t g_pc_draws, g_pc_same, g_pc_frames, g_pc_diff[5];
+
+static void passcache_draw(const G9Draw* d)
+{
+    if (g_pc < 0)
+        g_pc = getenv("XIV_VK_PASSCACHE") != NULL;
+    if (!g_pc || !g_rt[0] || (g_rt[0]->w >> g_rt_level[0]) >= 256 || g_pc_n >= PC_MAX)
+        return;
+    uint64_t* part = g_pc_part[g_pc_n];
+    part[0] = fnv64(&d->vs, sizeof d->vs) ^ fnv64(&d->ps, sizeof d->ps) * 3;
+    part[1] = fnv64(d->vsc, G9_VS_FLOATS * 16);
+    part[2] = fnv64(d->psc, G9_PS_FLOATS * 16);
+    part[3] = 0;
+    for (int i = 0; i < G9_SAMPLERS; ++i)
+        if (d->tex[i])
+        {
+            uint64_t t[2] = { (uint64_t)(uintptr_t)d->tex[i], d->tex[i]->wmax };
+            part[3] ^= fnv64(t, sizeof t) * (11 + 2 * (uint64_t)i);
+        }
+    uint64_t t[2] = { (uint64_t)(uintptr_t)g_rt[0], g_rt_level[0] };
+    part[4] = fnv64(d->samp, sizeof d->samp) * 13 ^ fnv64(&d->rs, sizeof d->rs) * 17 ^ fnv64(&d->vp, sizeof d->vp) * 19 ^
+              fnv64(t, sizeof t) * 23 ^ ((uint64_t)d->count * 29 + d->first);
+    g_pc_cur[g_pc_n++] = part[0] ^ part[1] * 5 ^ part[2] * 7 ^ part[3] * 11 ^ part[4] * 13;
+}
+
+static void passcache_frame(void)
+{
+    if (g_pc <= 0)
+        return;
+    for (uint32_t i = 0; i < g_pc_n; ++i)
+    {
+        g_pc_same += i < g_pc_prev_n && g_pc_cur[i] == g_pc_prev[i];
+        if (i < g_pc_prev_n)
+            for (int k = 0; k < 5; ++k)
+                g_pc_diff[k] += g_pc_part[i][k] != g_pc_prev_part[i][k];
+    }
+    g_pc_draws += g_pc_n;
+    memcpy(g_pc_prev, g_pc_cur, sizeof g_pc_cur[0] * g_pc_n);
+    memcpy(g_pc_prev_part, g_pc_part, sizeof g_pc_part[0] * g_pc_n);
+    g_pc_prev_n = g_pc_n;
+    g_pc_n = 0;
+    if (++g_pc_frames % 300 == 0 && g_pc_draws)
+    {
+        rt_log("[gfx9] passcache: %.1f small-target draws a frame, %.0f%% the same as the frame before; what changed: "
+               "shaders %.0f%%, vs constants %.0f%%, ps constants %.0f%%, textures %.0f%%, the rest %.0f%%\n",
+            g_pc_draws / 300.0, 100.0 * g_pc_same / g_pc_draws, 100.0 * g_pc_diff[0] / g_pc_draws,
+            100.0 * g_pc_diff[1] / g_pc_draws, 100.0 * g_pc_diff[2] / g_pc_draws, 100.0 * g_pc_diff[3] / g_pc_draws,
+            100.0 * g_pc_diff[4] / g_pc_draws);
+        g_pc_draws = g_pc_same = 0;
+        memset(g_pc_diff, 0, sizeof g_pc_diff);
+    }
+}
+
 /* --- draws -------------------------------------------------------------------------------------- */
 
 void g9_draw(const G9Draw* d)
@@ -3349,6 +3412,7 @@ void g9_draw(const G9Draw* d)
     else
         vkCmdDraw(cb, n, inst, d->first, 0);
     g_n_draws++;
+    passcache_draw(d);
     if (g_pass_timed)
         g_fr[g_frame].pass_draws[g_fr[g_frame].npass]++;
 }
@@ -3720,6 +3784,7 @@ void g9_present(G9Tex* bb)
         begin_pass();
     end_pass();
     up_frame_end(bb);
+    passcache_frame();
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels((SDL_Window*)g_sdl_window, &w, &h);
     if (w > 0 && h > 0 && ((uint32_t)w != g_swap_req_w || (uint32_t)h != g_swap_req_h))
