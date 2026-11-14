@@ -211,7 +211,7 @@ def info_plist(t):
         'CFBundleExecutable': EXE_NAME,
         'CFBundleIdentifier': t.bundle_id,
         'CFBundleName': APP_NAME,
-        'CFBundleDisplayName': 'FFXIV 1.23b',
+        'CFBundleDisplayName': 'FFXIV',
         'CFBundlePackageType': 'APPL',
         'CFBundleInfoDictionaryVersion': '6.0',
         'CFBundleShortVersionString': '1.23b',

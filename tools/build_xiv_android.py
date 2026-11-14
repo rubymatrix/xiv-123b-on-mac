@@ -273,7 +273,12 @@ def push_game(game):
     base = os.path.dirname(game)
     with tarfile.open(fileobj=p.stdin, mode='w|', format=tarfile.PAX_FORMAT) as tar:
         for i, path in enumerate(names):
-            tar.add(path, arcname=os.path.relpath(path, base), recursive=False)
+            # readable by the app: on the device the files belong to adb's user, so owner-only permissions
+            # (a folder copied from Windows can have them) would lock the app out of its own game
+            ti = tar.gettarinfo(path, arcname=os.path.relpath(path, base).replace(os.sep, '/'))
+            ti.mode = 0o644
+            with open(path, 'rb') as fh:
+                tar.addfile(ti, fh)
             if i % 2000 == 0:
                 print('@progress push %d %d' % (i, total), flush=True)
     p.stdin.close()

@@ -8,7 +8,7 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
     <application
-        android:label="FFXIV 1.23b"
+        android:label="FFXIV"
         android:debuggable="true"
         android:allowBackup="false"
         android:extractNativeLibs="true"
