@@ -2848,7 +2848,8 @@ static uint32_t ubo_put(uint8_t* last, uint32_t* last_off, const void* const* pa
     return off;
 }
 
-/* --- one-frame trace (XIV_GFXTRACE=<dir>; touch <dir>/req to trace the next frame), as on Metal but
+/* --- one-frame trace (XIV_GFXTRACE=<dir>; touch <dir>/req to trace the next frame, write a number to
+ * <dir>/scale to fix the render scale), as on Metal but
  * shorter: the 2D A8R8G8B8 render targets the frame samples, at its end, as <dir>/rt_<n>_<w>x<h>.ppm
  * (n in the order the frame first samples them) and their alpha as .pgm; draws.txt a line per draw */
 static const char* g_trace_dir;
@@ -2909,6 +2910,23 @@ static void trace_frame_end(void)
     if (!*g_trace_dir)
         return;
     char p[1200];
+    /* <dir>/scale holding a number: the render scale from the next frame on, fixed (to trace the same moment
+     * at two scales) */
+    snprintf(p, sizeof p, "%s/scale", g_trace_dir);
+    FILE* sf = fopen(p, "r");
+    if (sf)
+    {
+        float v = 0.0f;
+        if (fscanf(sf, "%f", &v) == 1 && v >= 0.25f && v <= 1.0f)
+        {
+            up_settings();
+            g_up.autom = 0;
+            g_up.want = v;
+            rt_log("[gfx9] trace: render scale set to %.2f\n", v);
+        }
+        fclose(sf);
+        remove(p);
+    }
     snprintf(p, sizeof p, "%s/req", g_trace_dir);
     if (remove(p) != 0)
         return;
