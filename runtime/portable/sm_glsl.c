@@ -1055,6 +1055,12 @@ static void prelude(Ctx* c)
     /* D3D9 hardware gives pow(x, 0) = 1, 0^0 included (pow(0, 0) is undefined in GLSL) */
     emit(c, "float Pow(float x, float y) { return y == 0.0 ? 1.0 : pow(abs(x), y); }\n");
     emit(c, "vec4 Nrm(vec4 v) { float d = dot(v.xyz, v.xyz); return d > 0.0 ? v * inversesqrt(d) : v; }\n");
+    /* A pixel shader's colour output with NaN as 0. D3D9 shaders reach NaN through log(0) = -inf and the like
+     * (FFXIV's scene-brightness chain: the log of a black pixel's luminance). What a GPU writes for NaN into an
+     * 8-bit target is up to it: Apple's write 0, so the Mac's frames were right, but a Mali writes 1, and in
+     * the Black Shroud's dark corners the whole brightness chain came out pure yellow and the scene washed
+     * out. 0 is what the Mac shows. */
+    emit(c, "vec4 Fin(vec4 v) { return mix(v, vec4(0.0), isnan(v)); }\n");
     emit(c, "vec4 Lit(vec4 s) { vec4 r = vec4(1.0, 0.0, 0.0, 1.0); if (s.x > 0.0) { r.y = s.x; "
             "if (s.y > 0.0) r.z = pow(s.y, clamp(s.w, -127.9961, 127.9961)); } return r; }\n");
     /* defi/defb override the buffers */
@@ -1342,9 +1348,9 @@ static void pixel_program(Ctx* c)
     }
     for (unsigned i = 0; i < 4; ++i)
         if (info->color_outputs & (1u << i))
-            emit(c, "    out_c%u = oC[%u];\n", i, i);
+            emit(c, "    out_c%u = Fin(oC[%u]);\n", i, i);
     if (!info->color_outputs)
-        emit(c, "    out_c0 = oC[0];\n");
+        emit(c, "    out_c0 = Fin(oC[0]);\n");
     if (depth_out)
         emit(c, "    gl_FragDepth = oDepth;\n");
     emit(c, "}\n");
