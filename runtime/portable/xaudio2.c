@@ -535,8 +535,9 @@ static void pass(uint32_t n, uint32_t out_rate)
         ecb(1);
 }
 
-/* The speakers set the pace: each pass tops the device's queue up to ~40 ms (~80 ms on Android, where
- * a busy or warm phone held the thread up past 40 and the sound clicked). With no device the clock runs on
+/* The speakers set the pace: each pass tops the device's queue up to ~60 ms (~80 ms on Android, where
+ * a busy or warm phone held the thread up past 40 and the sound clicked; on the Mac 40 still popped now
+ * and then, while the game compiled shaders or loaded). A queue found empty is logged: a pop. With no device the clock runs on
  * the wall clock instead. (A high priority for it cost the Pixel 6a a fifth of its frame rate: the mixing
  * is busy, and took the fast cores from the game's threads.) */
 static void audio_thread(void* arg)
@@ -579,8 +580,18 @@ static void audio_thread(void* arg)
 #if defined(__ANDROID__)
             uint32_t target = rate / 12;
 #else
-            uint32_t target = rate / 25;
+            uint32_t target = rate / 16;
 #endif
+            /* the device ran dry since the last pass: what was heard is a gap, a pop */
+            static uint32_t dry, was;
+            if (!queued && was)
+            {
+                dry++;
+                if (dry <= 20 || dry % 100 == 0)
+                    rt_log("[xaudio2] the sound ran dry (%u times; the mixer was held up %.0f ms)\n", dry,
+                           (now - last) / 1e6);
+            }
+            was = 1;
             if (queued >= target)
                 continue;
             n = target - queued;
