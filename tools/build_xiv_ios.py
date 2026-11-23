@@ -211,23 +211,8 @@ def xivboot(t, exe):
     return out
 
 
-def transport_security(hosts):
-    """App Transport Security for the sign-in: plain http to the login hosts and the local network only"""
-    ats = {'NSAllowsLocalNetworking': True}
-    if hosts:
-        ats['NSExceptionDomains'] = {h: {'NSExceptionAllowsInsecureHTTPLoads': True} for h in hosts}
-    return ats
-
-
-def login_hosts(values):
-    """--login-host values as bare hosts: no scheme, port or path"""
-    out = []
-    for v in values or []:
-        h = v.split('://', 1)[-1].split('/', 1)[0]
-        h = h.rsplit(':', 1)[0] if h.count(':') == 1 else h
-        if h and h not in out:
-            out.append(h)
-    return out
+transport_security = build_xiv.transport_security  # plain http to the login hosts and the local network only
+login_hosts = build_xiv.login_hosts
 
 
 def info_plist(t, hosts=()):

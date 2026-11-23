@@ -56,81 +56,23 @@ NSString* signin_host(NSString* server)
     return s;
 }
 
-static NSString* with_scheme(NSString* v)
-{
-    if (![v isKindOfClass:NSString.class] || !v.length)
-        return nil;
-    return [v hasPrefix:@"http://"] || [v hasPrefix:@"https://"] ? v : [@"http://" stringByAppendingString:v];
-}
-
-/* the next base's /.well-known/legacyxiv, until one answers with a login server */
-static void discover_at(NSURLSession* session, NSArray<NSString*>* bases, NSUInteger i,
-                        void (^done)(NSString* login, NSString* lobby, NSString* patch))
-{
-    if (i >= bases.count)
-    {
-        dispatch_async(dispatch_get_main_queue(), ^{ done(nil, nil, nil); });
-        return;
-    }
-    NSURL* url = [NSURL URLWithString:[bases[i] stringByAppendingString:@"/.well-known/legacyxiv"]];
-    [[session dataTaskWithURL:url completionHandler:^(NSData* data, NSURLResponse* resp, NSError* err) {
-        NSDictionary* j = nil;
-        if (data && !err && [resp isKindOfClass:NSHTTPURLResponse.class] && ((NSHTTPURLResponse*)resp).statusCode == 200)
-            j = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        if (![j isKindOfClass:NSDictionary.class] || !j[@"login_server"])
-        {
-            discover_at(session, bases, i + 1, done);
-            return;
-        }
-        NSString* login = with_scheme(j[@"login_server"]);
-        NSString* lobby = [j[@"lobby_server"] isKindOfClass:NSString.class] ? signin_host(j[@"lobby_server"]) : nil;
-        NSString* patch = with_scheme(j[@"game_patch_server"]);
-        dispatch_async(dispatch_get_main_queue(), ^{ done(login, lobby.length ? lobby : nil, patch); });
-    }] resume];
-}
-
-void signin_discover(NSString* server, void (^done)(NSString* login, NSString* lobby, NSString* patch))
+NSString* signin_login_page(NSString* server)
 {
     NSString* s = [server stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-    NSString* host = signin_host(s);
-    NSMutableArray<NSString*>* bases = [NSMutableArray array];
-    BOOL exact = [s rangeOfString:@"://"].location != NSNotFound || [s rangeOfString:@":"].location != NSNotFound;
-    if (exact)
-    {
-        NSString* b = with_scheme(s);
-        NSRange path = [b rangeOfString:@"/" options:0 range:NSMakeRange([b rangeOfString:@"://"].location + 3, b.length - [b rangeOfString:@"://"].location - 3)];
-        [bases addObject:path.location != NSNotFound ? [b substringToIndex:path.location] : b];
-    }
-    else if (host.length)
-        [bases addObjectsFromArray:@[ [@"http://" stringByAppendingString:host], [@"https://" stringByAppendingString:host],
-                                      [NSString stringWithFormat:@"http://%@:17743", host] ]];
-    NSURLSessionConfiguration* cfg = NSURLSessionConfiguration.ephemeralSessionConfiguration;
-    cfg.timeoutIntervalForRequest = 4;
-    discover_at([NSURLSession sessionWithConfiguration:cfg], bases, 0, done);
-}
-
-void signin_autofill(NSString* server, void (^done)(BOOL found))
-{
-    signin_discover(server, ^(NSString* login, NSString* lobby, NSString* patch) {
-        (void)patch;
-        NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
-        if (login && (!signin_saved(@"xiv.login").length || [d boolForKey:@"xiv.login_auto"]))
-        {
-            [d setObject:login forKey:@"xiv.login"];
-            [d setBool:YES forKey:@"xiv.login_auto"];
-        }
-        if (lobby)
-            [d setObject:lobby forKey:@"xiv.lobby"];
-        else
-            [d removeObjectForKey:@"xiv.lobby"];
-        done(login != nil);
-    });
+    NSRange r = [s rangeOfString:@"://"];
+    NSString* scheme = r.location != NSNotFound ? [s substringToIndex:r.location] : @"http";
+    if (r.location != NSNotFound)
+        s = [s substringFromIndex:NSMaxRange(r)];
+    NSRange slash = [s rangeOfString:@"/"];
+    if (slash.location != NSNotFound)
+        s = [s substringToIndex:slash.location];
+    return s.length ? [NSString stringWithFormat:@"%@://%@/account/content/ffxivlogin", scheme, s] : nil;
 }
 
 NSString* signin_lobby(void)
 {
     NSString* lobby = signin_saved(@"xiv.lobby");
-    return lobby.length ? lobby : signin_host(signin_saved(@"xiv.server"));
+    return lobby.length ? signin_host(lobby) : signin_host(signin_saved(@"xiv.server"));
 }
 
 NSString* signin_saved(NSString* key)
@@ -150,22 +92,34 @@ void signin_keep(NSString* user, NSString* password, BOOL remember)
     NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
     [d setObject:user forKey:@"xiv.user"];
     [d setBool:remember forKey:@"xiv.remember"];
-    signin_key_save(signin_saved(@"xiv.login"), user, remember ? password : nil);
+    NSString* login = signin_login_page(signin_saved(@"xiv.server"));
+    if (login)
+        signin_key_save(login, user, remember ? password : nil);
 }
 
-void signin_post(NSString* login, NSString* user, NSString* password, void (^done)(NSString* session, NSString* why))
+/* the first group of a pattern's first match in text, or nil */
+static NSString* first_match(NSString* text, NSString* pattern)
 {
-    if (![login hasPrefix:@"http://"] && ![login hasPrefix:@"https://"])
-        login = [@"http://" stringByAppendingString:login];
-    while ([login hasSuffix:@"/"])
-        login = [login substringToIndex:login.length - 1];
-    NSURL* url = [NSURL URLWithString:[login stringByAppendingString:@"/oauth/ffxiv/login/login.send"]];
+    NSRegularExpression* re = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionCaseInsensitive error:nil];
+    NSTextCheckingResult* m = text ? [re firstMatchInString:text options:0 range:NSMakeRange(0, text.length)] : nil;
+    return m ? [text substringWithRange:[m rangeAtIndex:1]] : nil;
+}
+
+NSString* signin_session_in(NSString* page)
+{
+    return first_match(page, @"<x-sqexauth\\b[^>]*\\bsid=\"([0-9A-Fa-f]{56})\"");
+}
+
+void signin_post(NSString* server, NSString* user, NSString* password, void (^done)(NSString* session, NSString* why))
+{
+    NSString* login = signin_login_page(server);
+    NSURL* url = login ? [NSURL URLWithString:login] : nil;
     if (!url)
     {
-        dispatch_async(dispatch_get_main_queue(), ^{ done(nil, @"The login page is not an address."); });
+        dispatch_async(dispatch_get_main_queue(), ^{ done(nil, @"The server address is not an address."); });
         return;
     }
-    NSString* body = [NSString stringWithFormat:@"sqexid=%@&password=%@", form_value(user), form_value(password)];
+    NSString* body = [NSString stringWithFormat:@"username=%@&password=%@", form_value(user), form_value(password)];
     NSMutableURLRequest* req = [NSMutableURLRequest requestWithURL:url];
     req.HTTPMethod = @"POST";
     req.timeoutInterval = 20;
@@ -173,21 +127,16 @@ void signin_post(NSString* login, NSString* user, NSString* password, void (^don
     req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
     [[NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData* data, NSURLResponse* resp, NSError* err) {
         NSString* text = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
-        NSString *sid = nil, *why = nil;
-        NSRange ok = text ? [text rangeOfString:@"login=auth,ok,sid,"] : NSMakeRange(NSNotFound, 0);
-        if (ok.location != NSNotFound && text.length >= NSMaxRange(ok) + 56)
-            sid = [text substringWithRange:NSMakeRange(NSMaxRange(ok), 56)];
-        else if (text && [text rangeOfString:@"login=auth,ng,err,"].location != NSNotFound)
-        {
-            NSString* rest = [text substringFromIndex:NSMaxRange([text rangeOfString:@"login=auth,ng,err,"])];
-            NSRange q = [rest rangeOfString:@"\""];
-            why = q.location != NSNotFound ? [rest substringToIndex:q.location] : rest;
-        }
+        NSInteger code = [resp isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse*)resp).statusCode : 0;
+        NSString *sid = signin_session_in(text), *why = nil;
+        if (sid)
+            ;
         else if (err)
             why = err.localizedDescription;
+        else if (code == 200) /* the form again: the server's message in its error element, when it has one */
+            why = first_match(text, @"id=\"?err\"?[^>]*>\\s*([^<]*[^<\\s])") ?: @"The server did not sign you in. Check your username and password.";
         else
-            why = [NSString stringWithFormat:@"The login page answered something else (HTTP %ld).",
-                            (long)((NSHTTPURLResponse*)resp).statusCode];
+            why = [NSString stringWithFormat:@"The login page answered something else (HTTP %ld).", (long)code];
         dispatch_async(dispatch_get_main_queue(), ^{ done(sid, why); });
     }] resume];
 }

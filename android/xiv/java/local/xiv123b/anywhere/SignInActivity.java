@@ -20,7 +20,6 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
-import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
@@ -33,8 +32,8 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -42,10 +41,12 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
 /* The sign-in screen, before the game (MainActivity), as the iPhone's (tests/ios_signin.m with
- * tests/signin_core.m): the server's address, the account, and a switch to keep the password. The server
- * says where its login page and lobby are in /.well-known/legacyxiv; the account is posted to the login
- * page's retail route, which answers with a session id. The game gets the session, the server and the
- * lobby as its arguments (MainActivity.getArguments, then tests/xivboot_android.c).
+ * tests/signin_core.m): the server's address, the account, and a switch to keep the password. The account
+ * is posted to the server's 1.23b login page as ffxivlogin.exe uses it (http://<server>/account/content/
+ * ffxivlogin, as Meteor-PatchLogin-Server serves it); the session id is in the <x-sqexauth sid="...">
+ * tag of its answer, and an answer without the tag is a refusal. The lobby is the server's host unless
+ * another one is set under "Server settings". The game gets the session, the server and the lobby as
+ * its arguments (MainActivity.getArguments, then tests/xivboot_android.c).
  *
  * The password, when kept, is encrypted with a key in the Android keystore that never leaves it. A
  * run.args with XIV_ARGS (scripted runs, docs/android-port.md) skips this screen; a server.txt beside it
@@ -54,7 +55,7 @@ public final class SignInActivity extends Activity {
     private static final String KEY_ALIAS = "xiv-signin";
 
     private SharedPreferences prefs;
-    private EditText server, user, password, login;
+    private EditText server, user, password, lobby;
     private CheckBox remember;
     private Button signIn;
     private TextView status;
@@ -76,13 +77,13 @@ public final class SignInActivity extends Activity {
         server.setText(s);
         user.setText(prefs.getString("user", ""));
         remember.setChecked(prefs.getBoolean("remember", true));
-        if (!prefs.getBoolean("login_auto", false))
-            login.setText(prefs.getString("login", ""));
-        String kept = loadPassword(prefs.getString("login", ""), user.getText().toString());
+        lobby.setText(prefs.getString("lobby_set", ""));
+        String page = loginPage(s);
+        String kept = page == null ? null : loadPassword(page, user.getText().toString());
         if (kept != null)
             password.setText(kept);
-        if (login.getText().length() > 0)
-            login.setVisibility(View.VISIBLE); /* a login page the player typed: in sight */
+        if (lobby.getText().length() > 0)
+            lobby.setVisibility(View.VISIBLE); /* a lobby the player set: in sight */
     }
 
     // --- the screen -----------------------------------------------------------------------------
@@ -148,15 +149,15 @@ public final class SignInActivity extends Activity {
         actions.addView(signIn);
         col.addView(actions, row(dp, 4));
 
-        login = field("Login page (found from the server; type one to use your own)",
+        lobby = field("Lobby, if another host than the server's (optional)",
             InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        login.setTextSize(13);
-        login.setVisibility(login.getText().length() > 0 ? View.VISIBLE : View.GONE);
-        col.addView(login, row(dp, 4));
+        lobby.setTextSize(13);
+        lobby.setVisibility(lobby.getText().length() > 0 ? View.VISIBLE : View.GONE);
+        col.addView(lobby, row(dp, 4));
         more.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                login.setVisibility(login.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+                lobby.setVisibility(lobby.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
             }
         });
 
@@ -207,7 +208,7 @@ public final class SignInActivity extends Activity {
         final String s = server.getText().toString().trim();
         final String u = user.getText().toString().trim();
         final String pw = password.getText().toString();
-        final String typedLogin = login.getText().toString().trim();
+        final String typedLobby = lobby.getText().toString().trim();
         final boolean keep = remember.isChecked();
         if (s.isEmpty() || u.isEmpty() || pw.isEmpty()) {
             say("Type the server's address, your username and your password.", true);
@@ -215,20 +216,17 @@ public final class SignInActivity extends Activity {
         }
         busy = true;
         signIn.setEnabled(false);
-        say("Looking for the server...", false);
+        say("Signing in...", false);
         new Thread(new Runnable() {
           @Override
           public void run() {
             try {
-                String[] found = discover(s);
-                String loginPage = !typedLogin.isEmpty() ? withScheme(typedLogin) : found[0];
+                final String loginPage = loginPage(s);
                 if (loginPage == null) {
-                    say("The server did not say where its login page is. Check the address, or type the login "
-                        + "page your server's people gave you.", true);
+                    say("The server's address is not an address.", true);
                     return;
                 }
-                final String lobby = found[1] != null ? found[1] : host(s);
-                say("Signing in...", false);
+                final String lobbyHost = typedLobby.isEmpty() ? host(s) : host(typedLobby);
                 final String[] r = post(loginPage, u, pw);
                 if (r[0] == null) {
                     say(r[1], true);
@@ -236,10 +234,9 @@ public final class SignInActivity extends Activity {
                 }
                 SharedPreferences.Editor e = prefs.edit();
                 e.putString("server", s).putString("user", u).putBoolean("remember", keep);
-                e.putString("login", loginPage).putBoolean("login_auto", typedLogin.isEmpty());
-                e.putString("lobby", lobby).apply();
+                e.putString("lobby_set", typedLobby).putString("lobby", lobbyHost).apply();
                 savePassword(loginPage, u, keep ? pw : null);
-                final String session = r[0], lob = lobby;
+                final String session = r[0], lob = lobbyHost;
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
@@ -269,52 +266,36 @@ public final class SignInActivity extends Activity {
         finish();
     }
 
-    /* {login page, lobby host} from /.well-known/legacyxiv: at what was typed when it names a scheme
-     * or port, else at the host's port 80, https, then 17743 (signin_core.m's signin_discover) */
-    private static String[] discover(String typed) {
-        List<String> bases = new ArrayList<>();
-        String h = host(typed);
-        if (typed.contains("://") || typed.contains(":")) {
-            String b = withScheme(typed);
-            int path = b.indexOf('/', b.indexOf("://") + 3);
-            bases.add(path >= 0 ? b.substring(0, path) : b);
-        } else if (!h.isEmpty()) {
-            bases.add("http://" + h);
-            bases.add("https://" + h);
-            bases.add("http://" + h + ":17743");
+    /* the 1.23b login page on a server: http://<host[:port]>/account/content/ffxivlogin (https when the
+     * address says so; signin_core.m's signin_login_page). null for none. */
+    static String loginPage(String server) {
+        String v = server.trim();
+        String scheme = "http";
+        int i = v.indexOf("://");
+        if (i >= 0) {
+            scheme = v.substring(0, i);
+            v = v.substring(i + 3);
         }
-        for (String b : bases) {
-            try {
-                HttpURLConnection c = (HttpURLConnection) new URL(b + "/.well-known/legacyxiv").openConnection();
-                c.setConnectTimeout(4000);
-                c.setReadTimeout(4000);
-                if (c.getResponseCode() != 200)
-                    continue;
-                JSONObject j = new JSONObject(read(c.getInputStream()));
-                String login = j.optString("login_server", "");
-                if (login.isEmpty())
-                    continue;
-                String lobby = host(j.optString("lobby_server", ""));
-                return new String[] { withScheme(login), lobby.isEmpty() ? null : lobby };
-            } catch (Exception ignored) {
-                // the next place
-            }
-        }
-        return new String[] { null, null };
+        int slash = v.indexOf('/');
+        if (slash >= 0)
+            v = v.substring(0, slash);
+        return v.isEmpty() ? null : scheme + "://" + v + "/account/content/ffxivlogin";
     }
 
-    /* {session, null} or {null, why}: the account posted to <login>/oauth/ffxiv/login/login.send, the
-     * retail route (signin_core.m's signin_post, tools/xiv_login.py --kodama) */
-    private static String[] post(String login, String user, String password) throws Exception {
-        while (login.endsWith("/"))
-            login = login.substring(0, login.length() - 1);
-        HttpURLConnection c = (HttpURLConnection) new URL(login + "/oauth/ffxiv/login/login.send").openConnection();
+    private static final Pattern SQEXAUTH = Pattern.compile("<x-sqexauth\\b[^>]*\\bsid=\"([0-9A-Fa-f]{56})\"", Pattern.CASE_INSENSITIVE);
+    private static final Pattern PAGE_ERROR = Pattern.compile("id=\"?err\"?[^>]*>\\s*([^<]*[^<\\s])", Pattern.CASE_INSENSITIVE);
+
+    /* {session, null} or {null, why}: username and password posted to the login page; the session id
+     * from its answer's <x-sqexauth sid="..."> tag, else the page's error message (signin_core.m's
+     * signin_post) */
+    static String[] post(String loginPage, String user, String password) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(loginPage).openConnection();
         c.setConnectTimeout(20000);
         c.setReadTimeout(20000);
         c.setRequestMethod("POST");
         c.setDoOutput(true);
         c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-        byte[] body = ("sqexid=" + URLEncoder.encode(user, "UTF-8") + "&password=" + URLEncoder.encode(password, "UTF-8"))
+        byte[] body = ("username=" + URLEncoder.encode(user, "UTF-8") + "&password=" + URLEncoder.encode(password, "UTF-8"))
             .getBytes(StandardCharsets.UTF_8);
         try (OutputStream o = c.getOutputStream()) {
             o.write(body);
@@ -322,16 +303,14 @@ public final class SignInActivity extends Activity {
         int code = c.getResponseCode();
         InputStream in = code < 400 ? c.getInputStream() : c.getErrorStream();
         String text = in != null ? read(in) : "";
-        int ok = text.indexOf("login=auth,ok,sid,");
-        if (ok >= 0 && text.length() >= ok + 18 + 56)
-            return new String[] { text.substring(ok + 18, ok + 18 + 56), null };
-        int ng = text.indexOf("login=auth,ng,err,");
-        if (ng >= 0) {
-            String rest = text.substring(ng + 18);
-            int q = rest.indexOf('"');
-            return new String[] { null, q >= 0 ? rest.substring(0, q) : rest };
+        Matcher ok = SQEXAUTH.matcher(text);
+        if (ok.find())
+            return new String[] { ok.group(1), null };
+        if (code == 200) {
+            Matcher err = PAGE_ERROR.matcher(text);
+            return new String[] { null, err.find() ? err.group(1) : "The server did not sign you in. Check your username and password." };
         }
-        return new String[] { null, "The login page did not answer as a FINAL FANTASY XIV login page (HTTP " + code + ")." };
+        return new String[] { null, "The login page answered something else (HTTP " + code + ")." };
     }
 
     // --- small things -----------------------------------------------------------------------------
@@ -348,12 +327,6 @@ public final class SignInActivity extends Activity {
                 s = s.substring(0, c);
         }
         return s;
-    }
-
-    private static String withScheme(String v) {
-        if (v == null || v.isEmpty())
-            return null;
-        return v.startsWith("http://") || v.startsWith("https://") ? v : "http://" + v;
     }
 
     private static String read(InputStream in) throws Exception {

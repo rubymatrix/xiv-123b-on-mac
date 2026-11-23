@@ -3,8 +3,8 @@
  *
  * The game folder: the app's defaults (xiv.game, which the installer writes), else chosen once with
  * a folder panel and kept. The sign-in: username, password, Remember password and Sign In in a
- * window; the server and its login page in a dialog behind the gear (opened by itself on the first
- * run). It posts as the iOS screen does (signin_core.m) and sets XIV_ARGS, XIV_TICK, XIV_SERVER_HOST
+ * window; the server (and the lobby, when it is another host) in a dialog behind the gear (opened by
+ * itself on the first run). It posts as the iOS screen does (signin_core.m) and sets XIV_ARGS, XIV_TICK, XIV_SERVER_HOST
  * and XIV_LOBBY for the game. Started with arguments (tools/xiv_login.py, xivboot <exe> ...), nothing
  * here happens. */
 #import <AppKit/AppKit.h>
@@ -81,8 +81,9 @@ static NSString* game_folder(void)
     self.password.action = @selector(signIn);
     self.remember = [NSButton checkboxWithTitle:@"Remember password" target:nil action:nil];
     self.remember.state = signin_remember() ? NSControlStateValueOn : NSControlStateValueOff;
-    if (signin_remember() && self.user.stringValue.length && signin_saved(@"xiv.login").length)
-        self.password.stringValue = signin_key_load(signin_saved(@"xiv.login"), self.user.stringValue) ?: @"";
+    NSString* page = signin_login_page(signin_saved(@"xiv.server"));
+    if (signin_remember() && self.user.stringValue.length && page)
+        self.password.stringValue = signin_key_load(page, self.user.stringValue) ?: @"";
     self.spinner = [NSProgressIndicator new];
     self.spinner.style = NSProgressIndicatorStyleSpinning;
     self.spinner.controlSize = NSControlSizeSmall;
@@ -114,21 +115,21 @@ static NSString* game_folder(void)
     self.status.textColor = error ? NSColor.systemRedColor : NSColor.secondaryLabelColor;
 }
 
-/* the server and its login page, in a dialog of their own */
+/* the server, and the lobby when it is another host, in a dialog of their own */
 - (void)showServer
 {
     NSAlert* a = [NSAlert new];
     a.messageText = @"Server";
-    a.informativeText = @"The server's address, from whoever runs it. Its login page is found from the server when it can be.";
+    a.informativeText = @"The server's address (host, or host:port), from whoever runs it. The lobby is the same host unless they gave you another.";
     NSTextField* server = [NSTextField textFieldWithString:signin_saved(@"xiv.server")];
     server.placeholderString = @"Server address, e.g. 203.0.113.5";
-    NSTextField* login = [NSTextField textFieldWithString:signin_saved(@"xiv.login")];
-    login.placeholderString = @"Login page (optional: found from the server)";
-    NSStackView* fields = [NSStackView stackViewWithViews:@[ server, login ]];
+    NSTextField* lobby = [NSTextField textFieldWithString:signin_saved(@"xiv.lobby")];
+    lobby.placeholderString = @"Lobby, if another host (optional)";
+    NSStackView* fields = [NSStackView stackViewWithViews:@[ server, lobby ]];
     fields.orientation = NSUserInterfaceLayoutOrientationVertical;
     fields.frame = NSMakeRect(0, 0, 300, 56);
     [server.widthAnchor constraintEqualToConstant:300].active = YES;
-    [login.widthAnchor constraintEqualToConstant:300].active = YES;
+    [lobby.widthAnchor constraintEqualToConstant:300].active = YES;
     a.accessoryView = fields;
     [a addButtonWithTitle:@"Save"];
     [a addButtonWithTitle:@"Cancel"];
@@ -138,35 +139,19 @@ static NSString* game_folder(void)
     NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
     NSCharacterSet* ws = NSCharacterSet.whitespaceCharacterSet;
     [d setObject:[server.stringValue stringByTrimmingCharactersInSet:ws] forKey:@"xiv.server"];
-    NSString* typed = [login.stringValue stringByTrimmingCharactersInSet:ws];
-    if (![typed isEqualToString:signin_saved(@"xiv.login")])
-        [d setBool:NO forKey:@"xiv.login_auto"]; /* the player's own */
-    [d setObject:typed forKey:@"xiv.login"];
-    if (!typed.length || [d boolForKey:@"xiv.login_auto"])
-        signin_autofill(signin_saved(@"xiv.server"), ^(BOOL found) { (void)found; });
-    if (!self.password.stringValue.length && signin_remember() && self.user.stringValue.length)
-        self.password.stringValue = signin_key_load(signin_saved(@"xiv.login"), self.user.stringValue) ?: @"";
+    [d setObject:[lobby.stringValue stringByTrimmingCharactersInSet:ws] forKey:@"xiv.lobby"];
+    NSString* page = signin_login_page(signin_saved(@"xiv.server"));
+    if (!self.password.stringValue.length && signin_remember() && self.user.stringValue.length && page)
+        self.password.stringValue = signin_key_load(page, self.user.stringValue) ?: @"";
 }
 
 - (void)signIn
 {
-    NSString* login = signin_saved(@"xiv.login");
     NSString* user = [self.user.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
     NSString* password = self.password.stringValue;
     if (!signin_saved(@"xiv.server").length)
     {
         [self showServer];
-        return;
-    }
-    if (!login.length) /* not found yet: ask the server, then sign in */
-    {
-        [self busy:YES status:@"Looking for the server's login page…" error:NO];
-        signin_autofill(signin_saved(@"xiv.server"), ^(BOOL found) {
-            if (found)
-                [self signIn];
-            else
-                [self busy:NO status:@"The server did not say where its login page is: enter it in the server settings (the gear)." error:YES];
-        });
         return;
     }
     if (!user.length || !password.length)
@@ -176,7 +161,7 @@ static NSString* game_folder(void)
     }
     [self busy:YES status:@"Signing in…" error:NO];
     BOOL remember = self.remember.state == NSControlStateValueOn;
-    signin_post(login, user, password, ^(NSString* sid, NSString* why) {
+    signin_post(signin_saved(@"xiv.server"), user, password, ^(NSString* sid, NSString* why) {
         if (!sid)
         {
             [self busy:NO status:why error:YES];

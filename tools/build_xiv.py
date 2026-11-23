@@ -203,7 +203,7 @@ def translate(exe):
          GEN, '--all', '--wraps', WRAPS] + extra_entries(exe))
 
 
-def xivboot(exe, run_it, extra, debug=False, opt='-O1', pgo=None):
+def xivboot(exe, run_it, extra, debug=False, opt='-O1', pgo=None, hosts=()):
     if not os.path.exists(os.path.join(ROOT, GEN, 'table.c')):
         translate(exe)
     gen = sorted(os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, GEN, '*.c')))
@@ -248,7 +248,7 @@ def xivboot(exe, run_it, extra, debug=False, opt='-O1', pgo=None):
     run_lto(['clang', '-o', 'build/xivboot', '-flto=thin', '-O3', '-mcpu=apple-m1', '-Wl,-U,___llvm_profile_write_file'] + pgo_flags + inl_flags + [
              '-Wl,-cache_path_lto,build/xiv/lto-cache', '-Wl,-mllvm,-threads=%d' % (os.cpu_count() or 4)]
             + objs + thirdparty.libs('sdl3') + GFX_LIBS + SIGNIN_LIBS + ['-lm', '-lpthread'], 'build/xiv/lto-cache', len(gen))
-    xiv_bundle(exe)
+    xiv_bundle(exe, hosts)
     with open(os.path.join(ROOT, 'build', 'xivboot.sha256'), 'w') as f:  # which ffxivgame.exe (xiv_run.py)
         f.write(sha256(exe) + '\n')
     if run_it:
@@ -320,7 +320,7 @@ XIV_PLIST = '''<?xml version="1.0" encoding="UTF-8"?>
 	<key>LSApplicationCategoryType</key><string>public.app-category.role-playing-games</string>
 	<key>LSSupportsGameMode</key><true/>
 	<key>NSHighResolutionCapable</key><true/>
-	<key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
+	<key>NSAppTransportSecurity</key>@ATS@
 </dict>
 </plist>
 '''
@@ -362,7 +362,36 @@ def exe_icns(exe, out):
                                stderr=subprocess.DEVNULL) == 0
 
 
-def xiv_bundle(game_exe=None):
+def transport_security(hosts):
+    """App Transport Security for the sign-in (tests/signin_core.m): the 1.23b login page is plain http,
+    so plain http is allowed to the login hosts (--login-host) and the local network only"""
+    ats = {'NSAllowsLocalNetworking': True}
+    if hosts:
+        ats['NSExceptionDomains'] = {h: {'NSExceptionAllowsInsecureHTTPLoads': True} for h in hosts}
+    return ats
+
+
+def login_hosts(values):
+    """--login-host values as bare hosts: no scheme, port or path"""
+    out = []
+    for v in values or []:
+        h = v.split('://', 1)[-1].split('/', 1)[0]
+        h = h.rsplit(':', 1)[0] if h.count(':') == 1 else h
+        if h and h not in out:
+            out.append(h)
+    return out
+
+
+def plist_dict(d):
+    """a dict of dicts and booleans as plist XML, on one line"""
+    out = '<dict>'
+    for k, v in d.items():
+        out += '<key>%s</key>' % k.replace('&', '&amp;').replace('<', '&lt;')
+        out += plist_dict(v) if isinstance(v, dict) else '<true/>' if v else '<false/>'
+    return out + '</dict>'
+
+
+def xiv_bundle(game_exe=None, hosts=()):
     """build/xivboot inside an app bundle (a hard link), so macOS sees a game: Game Mode turns on
     when it runs full screen, and it shows ffxivgame.exe's icon. xiv_login.py starts this copy."""
     macos = os.path.join(ROOT, XIV_APP, 'Contents', 'MacOS')
@@ -371,7 +400,7 @@ def xiv_bundle(game_exe=None):
     if os.path.lexists(exe):
         os.remove(exe)
     os.link(os.path.join(ROOT, 'build', 'xivboot'), exe)
-    plist = XIV_PLIST
+    plist = XIV_PLIST.replace('@ATS@', plist_dict(transport_security(hosts)))
     if game_exe and exe_icns(game_exe, os.path.join(ROOT, XIV_APP, 'Contents', 'Resources', 'AppIcon.icns')):
         plist = plist.replace('<key>CFBundleName</key>', '<key>CFBundleIconFile</key><string>AppIcon</string>\n\t<key>CFBundleName</key>')
     with open(os.path.join(ROOT, XIV_APP, 'Contents', 'Info.plist'), 'w') as f:
@@ -388,6 +417,8 @@ def main():
     ap.add_argument('--opt', default='-O1', help='optimization for the translation in --debug builds (-O0 keeps every register local visible but runs slowly)')
     ap.add_argument('--pgo', choices=('gen', 'use'), help='profile-guided optimization: an instrumented build, or one using its profile')
     ap.add_argument('--name', help='exe: which launcher program (ffxivboot, ffxivlogin, ffxivupdater); default from --exe')
+    ap.add_argument('--login-host', action='append',
+                    help="xivboot: the login server's host (repeatable); the app allows plain http to it only")
     ap.add_argument('rest', nargs='*')
     a = ap.parse_args()
     exe = os.path.abspath(a.exe)
@@ -398,7 +429,7 @@ def main():
     elif a.target == 'translate':
         translate(exe)
     else:
-        xivboot(exe, a.run, a.rest, a.debug, a.opt, a.pgo)
+        xivboot(exe, a.run, a.rest, a.debug, a.opt, a.pgo, login_hosts(a.login_host))
 
 
 if __name__ == '__main__':

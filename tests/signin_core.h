@@ -3,7 +3,8 @@
 #pragma once
 #import <Foundation/Foundation.h>
 
-/* the app's defaults: xiv.server, xiv.login, xiv.user (strings), xiv.remember (bool, default yes) */
+/* the app's defaults: xiv.server (host, or host:port), xiv.lobby (only when it is another host),
+ * xiv.user (strings), xiv.remember (bool, default yes) */
 NSString* signin_saved(NSString* key);
 BOOL signin_remember(void);
 
@@ -12,21 +13,20 @@ NSString* signin_key_load(NSString* login, NSString* user);
 /* kept (or, with nil, forgotten) */
 void signin_key_save(NSString* login, NSString* user, NSString* password);
 
-/* Posts the account to <login>/oauth/ffxiv/login/login.send (the retail route, as xiv_login.py
- * --kodama). done runs on the main queue with the 56-hex-digit session id, or nil and why not. */
-void signin_post(NSString* login, NSString* user, NSString* password, void (^done)(NSString* session, NSString* why));
+/* The 1.23b login page on a server, as ffxivlogin.exe uses it and Meteor-PatchLogin-Server serves it:
+ * http://<host[:port]>/account/content/ffxivlogin (https when the address says so). nil for none. */
+NSString* signin_login_page(NSString* server);
 
-/* What a server says of itself in /.well-known/legacyxiv (the Umbra launcher's): its login page,
- * lobby and patch service. Looked for at what the player typed (a URL or host:port: only there), else
- * at the host's port 80, then https, then 17743. done runs on the main queue; nils when none answers. */
-void signin_discover(NSString* server, void (^done)(NSString* login, NSString* lobby, NSString* patch));
+/* Posts username and password to the server's login page. Its answer holds
+ * <x-sqexauth sid="<56 hex>" lang=... region=... utc=...> when the account signed in; without the tag
+ * it is a refusal, and the page's error message is the reason. done runs on the main queue with the
+ * session id, or nil and why not. */
+void signin_post(NSString* server, NSString* user, NSString* password, void (^done)(NSString* session, NSString* why));
 
-/* The server's settings from its discovery: the login page kept unless the player typed their own
- * (xiv.login, and xiv.login_auto while it is the discovered one), and the lobby (xiv.lobby, cleared
- * when none is given). done runs on the main queue: whether the server answered. */
-void signin_autofill(NSString* server, void (^done)(BOOL found));
+/* the session id in a login page's answer (its <x-sqexauth> tag), or nil */
+NSString* signin_session_in(NSString* page);
 
-/* the lobby to connect to: the discovered one, else the server's host */
+/* the lobby to connect to: xiv.lobby when set, else the server's host */
 NSString* signin_lobby(void);
 
 /* the host a server address names: no scheme, no port, no path */
