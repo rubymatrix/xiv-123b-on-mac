@@ -13,6 +13,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include "gthread.h"
 #include "gwin.h"
@@ -75,6 +78,7 @@ typedef struct Wnd
     int x, y, w, h, visible;
     int fullscreen; /* a full-screen D3D device is on it */
     SDL_Window* sdl;
+    int sw, sh; /* the SDL window's size in points (user32_main_tick): the client is scaled into it */
     uint32_t exstyle, userdata; /* GWL_EXSTYLE, GWL_USERDATA (SetWindowLongA) */
     /* comctl32 subclasses (SetWindowSubclass), last added first to see a message */
     struct { uint32_t proc, id, ref; } sub[8];
@@ -91,6 +95,45 @@ static Wnd* wnd(uint32_t hwnd)
         return NULL;
     uint32_t i = (hwnd - HWND_BASE) / HWND_STRIDE;
     return i < MAX_WINDOWS && g_wnds[i].used ? &g_wnds[i] : NULL;
+}
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+/* iOS: the cursor is where the last mouse event the game was given put it (window points), not
+ * SDL's mouse position: SDL moves that to every touch, the touch controls' presses too, and the game
+ * would take each D-pad tap for the mouse moving (its cursor leaves the pad's selection, and the
+ * press goes on taking it back) */
+static float g_evt_x, g_evt_y; /* the top left until the first click */
+#endif
+
+/* The window's points and the client's pixels. Present scales the back buffer (the client's size)
+ * into the window with its aspect kept, centred (gfx9_metal.m): a resized Mac window, an iPhone's
+ * screen in points. Mouse and touch points come in the window's points and go to the game in the
+ * client's; the game's own cursor positions go the other way. */
+static void client_scale(const Wnd* w, float* s, float* ox, float* oy)
+{
+    *s = 1.0f, *ox = 0.0f, *oy = 0.0f;
+    if (w->sw <= 0 || w->sh <= 0 || w->w <= 0 || w->h <= 0 || (w->sw == w->w && w->sh == w->h))
+        return;
+    float sx = (float)w->sw / (float)w->w, sy = (float)w->sh / (float)w->h;
+    *s = sx < sy ? sx : sy;
+    *ox = ((float)w->sw - (float)w->w * *s) * 0.5f;
+    *oy = ((float)w->sh - (float)w->h * *s) * 0.5f;
+}
+
+static void to_client(const Wnd* w, float px, float py, int* x, int* y)
+{
+    float s, ox, oy;
+    client_scale(w, &s, &ox, &oy);
+    float cx = (px - ox) / s, cy = (py - oy) / s;
+    *x = cx < 0 ? 0 : cx > (float)(w->w - 1) ? w->w - 1 : (int)cx;
+    *y = cy < 0 ? 0 : cy > (float)(w->h - 1) ? w->h - 1 : (int)cy;
+}
+
+static void to_window(const Wnd* w, int x, int y, float* px, float* py)
+{
+    float s, ox, oy;
+    client_scale(w, &s, &ox, &oy);
+    *px = ox + ((float)x + 0.5f) * s, *py = oy + ((float)y + 0.5f) * s;
 }
 
 /* The fraction of the client's width the interface keeps under --ui-aspect: 1 when it is off or the
@@ -656,7 +699,11 @@ static void pump(void)
             w = wnd_of_sdl(e.motion.windowID);
             if (w)
             {
-                int mx = (int)e.motion.x, my = (int)e.motion.y;
+                int mx, my;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+                g_evt_x = e.motion.x, g_evt_y = e.motion.y;
+#endif
+                to_client(w, e.motion.x, e.motion.y, &mx, &my);
                 ui_unsqueeze(w, &mx, &my);
                 /* the game's window procedure picks the pointer here: its shape, or none */
                 post(w->tid, w->hwnd, WM_SETCURSOR, w->hwnd, ((uint32_t)WM_MOUSEMOVE << 16) | HTCLIENT);
@@ -677,7 +724,14 @@ static void pump(void)
                                                                  : 0;
             if (!msg)
                 break;
-            int bx = (int)e.button.x, by = (int)e.button.y;
+            int bx, by;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+            g_evt_x = e.button.x, g_evt_y = e.button.y;
+#endif
+            to_client(w, e.button.x, e.button.y, &bx, &by);
+            if (inputlog)
+                rt_log("[input] button %d %s at %.1f,%.1f points of %dx%d -> %d,%d of the client %dx%d (hwnd %x, window at %d,%d)\n",
+                    e.button.button, down ? "down" : "up", e.button.x, e.button.y, w->sw, w->sh, bx, by, w->w, w->h, w->hwnd, w->x, w->y);
             ui_unsqueeze(w, &bx, &by);
             uint32_t lp = ((uint32_t)(uint16_t)by << 16) | (uint16_t)bx;
             g_mouse_held = SDL_GetMouseState(NULL, NULL) != 0;
@@ -687,8 +741,12 @@ static void pump(void)
         case SDL_EVENT_MOUSE_WHEEL:
             w = wnd_of_sdl(e.wheel.windowID);
             if (w)
+            {
+                int wx, wy;
+                to_client(w, e.wheel.mouse_x, e.wheel.mouse_y, &wx, &wy);
                 post(w->tid, w->hwnd, WM_MOUSEWHEEL, ((uint32_t)(uint16_t)(int16_t)(e.wheel.y * 120) << 16),
-                    ((uint32_t)(uint16_t)(int)e.wheel.mouse_y << 16) | (uint16_t)(int)e.wheel.mouse_x);
+                    ((uint32_t)(uint16_t)wy << 16) | (uint16_t)wx);
+            }
             break;
         case SDL_EVENT_QUIT:
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
@@ -789,6 +847,14 @@ static void apply_frame(Wnd* w)
     /* a macOS Space is only for a window with a frame: full screen hides it anyway */
     int spaces = SDL_GetHintBoolean(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, false);
     SDL_SetWindowBordered(w->sdl, !popup || (full && spaces));
+    /* a window with a frame can be resized: the game keeps its size and the picture is scaled into
+     * the window (client_scale), so the window keeps the game's shape */
+    SDL_SetWindowResizable(w->sdl, !popup && !full);
+    if (!popup && !full && w->h > 0)
+    {
+        float aspect = (float)w->w / (float)w->h;
+        SDL_SetWindowAspectRatio(w->sdl, aspect, aspect);
+    }
     SDL_SetWindowFullscreenMode(w->sdl, NULL);
     bool ok = SDL_SetWindowFullscreen(w->sdl, full);
     if (user32_cover_screen)
@@ -1055,8 +1121,21 @@ void user32_main_tick(void)
     if (!g_sdl_up)
         return;
     cursor_apply();
+    for (int i = 0; i < MAX_WINDOWS; ++i)
+        if (g_wnds[i].used && g_wnds[i].sdl)
+            SDL_GetWindowSize(g_wnds[i].sdl, &g_wnds[i].sw, &g_wnds[i].sh);
     float x = 0, y = 0;
     SDL_GetGlobalMouseState(&x, &y); /* on the main thread: no marshalling */
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    {
+        /* iOS has no desktop: SDL's "global" position is the one in the window, which is where the game
+         * placed it (its own centring, w->x, w->y); made the desktop's as GetCursorPos expects */
+        Wnd* fw = wnd(g_focus);
+        x = g_evt_x, y = g_evt_y; /* never SDL's, which follows every touch, until a click there is none */
+        if (fw)
+            x += (float)fw->x, y += (float)fw->y;
+    }
+#endif
     if (g_cursor_forced)
     {
         Wnd* w = wnd(g_focus);
@@ -1078,11 +1157,20 @@ static void sh_GetCursorPos(Guest* g)
     else if (g_sdl_up)
         SDL_GetGlobalMouseState(&x, &y);
     Wnd* w = wnd(g_focus);
-    if (w && x >= w->x && x < w->x + w->w && y >= w->y && y < w->y + w->h)
+    int ew = w && w->sw > 0 ? w->sw : w ? w->w : 0, eh = w && w->sh > 0 ? w->sh : w ? w->h : 0;
+    if (w && x >= w->x && x < w->x + ew && y >= w->y && y < w->y + eh)
     {
-        int cx = (int)x - w->x, cy = (int)y - w->y;
+        int cx, cy;
+        to_client(w, x - (float)w->x, y - (float)w->y, &cx, &cy);
         ui_unsqueeze(w, &cx, &cy);
         x = (float)(w->x + cx), y = (float)(w->y + cy);
+    }
+    if (getenv("XIV_INPUTLOG"))
+    {
+        static int lx = -99999, ly = -99999;
+        if ((int)x != lx || (int)y != ly)
+            rt_log("[input] GetCursorPos %d,%d (focus %x%s)\n", (int)x, (int)y, g_focus, w ? "" : ", no window");
+        lx = (int)x, ly = (int)y;
     }
     wr32(ARG(0), (uint32_t)(int32_t)x);
     wr32(ARG(0) + 4, (uint32_t)(int32_t)y);
@@ -1727,7 +1815,9 @@ static void sh_SetCursorPos(Guest* g)
     {
         int cx = (int)x - w->x, cy = (int)y - w->y;
         ui_squeeze_point(w, &cx, &cy);
-        x = (float)(w->x + cx), y = (float)(w->y + cy);
+        float px, py;
+        to_window(w, cx, cy, &px, &py);
+        x = (float)w->x + px, y = (float)w->y + py;
     }
     if (g_sdl_up)
         SDL_WarpMouseGlobal(x, y);
@@ -2042,13 +2132,44 @@ static void sh_DrawTextA(Guest* g) { draw_text(g, 0); }
 static void sh_DrawTextW(Guest* g) { draw_text(g, 1); }
 
 /* --- IMM32: the US client with no IME: a context that is never open ----------------------------------------- */
-static void sh_ImmGetContext(Guest* g) { RET(0x00070001u, 1); }
-static void sh_ImmReleaseContext(Guest* g) { RET(1, 2); }
-static void sh_ImmGetOpenStatus(Guest* g) { RET(0, 1); }
-static void sh_ImmSetOpenStatus(Guest* g) { RET(1, 2); }
-static void sh_ImmNotifyIME(Guest* g) { RET(1, 4); }
-static void sh_ImmSetCandidateWindow(Guest* g) { RET(1, 2); }
-static void sh_ImmSetCompositionWindow(Guest* g) { RET(1, 2); }
+/* A text field of the game's took or lost the keyboard (xiv_misc.c: ImmAssociateContext with a
+ * context, or with none). On iOS the screen keyboard comes up for it and goes away after; on the Mac
+ * text input stays on, as it always was. */
+void user32_text_field(uint32_t hwnd, int on)
+{
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    static int was = -1;
+    Wnd* w = wnd(hwnd);
+    if (!w || !w->sdl || on == was)
+        return;
+    was = on;
+    if (on)
+        SDL_StartTextInput(w->sdl);
+    else
+        SDL_StopTextInput(w->sdl);
+    rt_log("[ime] text field %s: the screen keyboard %s\n", on ? "focused" : "left", on ? "shown" : "hidden");
+#else
+    (void)hwnd, (void)on;
+#endif
+}
+
+/* XIV_IMELOG=1: each call the game makes, to find where its text fields take and lose the focus
+ * (the place to bring up a phone's keyboard) */
+static int imelog(void)
+{
+    static int on = -1;
+    if (on < 0)
+        on = getenv("XIV_IMELOG") && strcmp(getenv("XIV_IMELOG"), "0");
+    return on;
+}
+#define IMELOG(name, n) do { if (imelog()) rt_log("[ime] %s(%x, %x, %x) from %08x\n", name, n > 0 ? ARG(0) : 0, n > 1 ? ARG(1) : 0, n > 2 ? ARG(2) : 0, rd32(g->esp)); } while (0)
+static void sh_ImmGetContext(Guest* g) { IMELOG("ImmGetContext", 1); RET(0x00070001u, 1); }
+static void sh_ImmReleaseContext(Guest* g) { IMELOG("ImmReleaseContext", 2); RET(1, 2); }
+static void sh_ImmGetOpenStatus(Guest* g) { IMELOG("ImmGetOpenStatus", 1); RET(0, 1); }
+static void sh_ImmSetOpenStatus(Guest* g) { IMELOG("ImmSetOpenStatus", 2); RET(1, 2); }
+static void sh_ImmNotifyIME(Guest* g) { IMELOG("ImmNotifyIME", 3); RET(1, 4); }
+static void sh_ImmSetCandidateWindow(Guest* g) { IMELOG("ImmSetCandidateWindow", 2); RET(1, 2); }
+static void sh_ImmSetCompositionWindow(Guest* g) { IMELOG("ImmSetCompositionWindow", 2); RET(1, 2); }
 static void sh_ImmGetCandidateListA(Guest* g) { RET(0, 4); }
 static void sh_ImmGetCandidateListCountA(Guest* g) { if (ARG(1)) wr32(ARG(1), 0); RET(0, 2); }
 static void sh_ImmGetCompositionStringA(Guest* g) { RET(0, 4); }
