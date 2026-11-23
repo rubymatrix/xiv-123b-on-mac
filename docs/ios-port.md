@@ -119,7 +119,14 @@ Things to establish on the Mac:
   web pages, gets a 56 hex digit session id, and starts `xivboot` with launch arguments built by
   `tools/xiv_args.py` (Blowfish, keyed to the tick count the host starts the game clock at). An
   iPad has no Python, so this has to exist in C inside the app, or the app needs its own sign-in
-  screen as xi-on-anything's `host/signin.c` has.
+  screen as xi-on-anything's `host/signin.c` has. It now has one (`tests/ios_signin.m`). It posts
+  username and password to the 1.23b login page as ffxivlogin.exe uses it,
+  `http://<server>/account/content/ffxivlogin`, the page Meteor-PatchLogin-Server serves, and takes
+  the session id from the `<x-sqexauth sid="...">` tag in the answer. An answer without the tag is a
+  refusal, and the page's error message is shown. The player enters the server address (host, or
+  host:port); the lobby is the same host unless another one is set. The page is plain http, so
+  `build_xiv_ios.py --login-host <host>` lets App Transport Security allow plain http to that host
+  only, besides the local network.
 - `runtime/portable/xiv_direct_login.c` is a developer login that skips the title and lobby
   (`XIV_DIRECT_LOGIN=<character id>`). It may be a quick way to get the first frame in the world
   on a device before the real sign-in is ported. Meteor's support for that ticket login is not

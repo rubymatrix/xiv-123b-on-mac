@@ -1,10 +1,11 @@
-/* The sign-in screen on iOS (tests/xivboot_ios.c, before the game starts): the server, its login
- * page, the account and its password, in a UIKit form of its own window. Sign In posts the account to
- * the login page's retail route (/oauth/ffxiv/login/login.send, as tools/xiv_login.py --kodama), and
- * the session id it answers with becomes the game's launch argument (xiv_args.c).
+/* The sign-in screen on iOS (tests/xivboot_ios.c, before the game starts): the server, the account
+ * and its password, in a UIKit form of its own window. Sign In posts the account to the 1.23b login
+ * page on the server (signin_core.m: /account/content/ffxivlogin, as ffxivlogin.exe uses it), and the
+ * session id in the answer's <x-sqexauth> tag becomes the game's launch argument (xiv_args.c).
  *
- * The screen asks for the account only; the server and its login page are in a sheet behind the
- * gear (opened by itself on the first run). Both, and the username, are kept in the app's defaults;
+ * The screen asks for the account only; the server (host, or host:port) and the lobby, when it is
+ * another host, are in a sheet behind the gear (opened by itself on the first run). Both, and the
+ * username, are kept in the app's defaults;
  * the password in the keychain while "Remember password" is on. Runs on the main thread: the window is shown and the run
  * loop turned until a sign-in succeeds; then the window goes and the game makes its own. */
 #import <Foundation/Foundation.h>
@@ -69,7 +70,7 @@ static NSString* saved(NSString* key) { return signin_saved(key); }
 
 /* --- the server: a sheet behind the gear --------------------------------------------------------- */
 @interface XivServerSheet : UIViewController <UITextFieldDelegate>
-@property(nonatomic, strong) UITextField *server, *login;
+@property(nonatomic, strong) UITextField *server, *lobby;
 @property(nonatomic, copy) void (^done)(void);
 @end
 
@@ -83,17 +84,17 @@ static NSString* saved(NSString* key) { return signin_saved(key); }
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
                                                                                            target:self
                                                                                            action:@selector(finish)];
-    self.server = make_field(@"Server address, e.g. 203.0.113.5", NO, self);
+    self.server = make_field(@"Server address, e.g. 203.0.113.5 or 203.0.113.5:8000", NO, self);
     self.server.keyboardType = UIKeyboardTypeURL;
     self.server.text = saved(@"xiv.server");
-    self.login = make_field(@"Login page (found from the server when it can be)", NO, self);
-    self.login.keyboardType = UIKeyboardTypeURL;
-    self.login.returnKeyType = UIReturnKeyDone;
-    self.login.text = saved(@"xiv.login");
+    self.lobby = make_field(@"The server's host", NO, self);
+    self.lobby.keyboardType = UIKeyboardTypeURL;
+    self.lobby.returnKeyType = UIReturnKeyDone;
+    self.lobby.text = saved(@"xiv.lobby");
     UIColor* dim = UIColor.secondaryLabelColor;
     UIStackView* form = [[UIStackView alloc] initWithArrangedSubviews:@[
-        make_label(@"SERVER ADDRESS (THE LOBBY)", UIFontTextStyleFootnote, dim), self.server,
-        make_label(@"LOGIN PAGE (OPTIONAL)", UIFontTextStyleFootnote, dim), self.login
+        make_label(@"SERVER ADDRESS", UIFontTextStyleFootnote, dim), self.server,
+        make_label(@"LOBBY, IF ANOTHER HOST", UIFontTextStyleFootnote, dim), self.lobby
     ]];
     form.axis = UILayoutConstraintAxisVertical;
     form.spacing = 6;
@@ -104,36 +105,17 @@ static NSString* saved(NSString* key) { return signin_saved(key); }
 - (BOOL)textFieldShouldReturn:(UITextField*)f
 {
     if (f == self.server)
-        [self.login becomeFirstResponder];
+        [self.lobby becomeFirstResponder];
     else
         [self finish];
     return NO;
-}
-
-/* leaving the server's field: what the server says of itself fills the login page */
-- (void)textFieldDidEndEditing:(UITextField*)f
-{
-    if (f != self.server || !self.server.text.length)
-        return;
-    [NSUserDefaults.standardUserDefaults setObject:self.server.text forKey:@"xiv.server"];
-    signin_autofill(self.server.text, ^(BOOL found) {
-        if (found)
-            self.login.text = signin_saved(@"xiv.login");
-    });
-}
-
-/* the login page as typed: the player's own unless it is still the one found */
-- (void)textFieldDidChangeSelection:(UITextField*)f
-{
-    if (f == self.login && ![f.text isEqualToString:signin_saved(@"xiv.login")])
-        [NSUserDefaults.standardUserDefaults setBool:NO forKey:@"xiv.login_auto"];
 }
 
 - (void)finish
 {
     NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
     [d setObject:[self.server.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet] forKey:@"xiv.server"];
-    [d setObject:[self.login.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet] forKey:@"xiv.login"];
+    [d setObject:[self.lobby.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet] forKey:@"xiv.lobby"];
     [self dismissViewControllerAnimated:YES completion:self.done];
 }
 
@@ -177,8 +159,9 @@ static NSString* saved(NSString* key) { return signin_saved(key); }
     /* Remember password, then Sign In, on one row */
     self.remember = [UISwitch new];
     self.remember.on = signin_remember();
-    if (self.remember.on && saved(@"xiv.login").length && self.user.text.length)
-        self.password.text = signin_key_load(saved(@"xiv.login"), self.user.text);
+    NSString* page = signin_login_page(saved(@"xiv.server"));
+    if (self.remember.on && page && self.user.text.length)
+        self.password.text = signin_key_load(page, self.user.text);
     UILabel* rl = make_label(@"Remember password", UIFontTextStyleSubheadline, UIColor.labelColor);
     self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     self.spinner.hidesWhenStopped = YES;
@@ -217,8 +200,9 @@ static NSString* saved(NSString* key) { return signin_saved(key); }
     __weak XivSignIn* me = self;
     sheet.done = ^{
         XivSignIn* s = me;
-        if (s && !s.password.text.length && s.remember.on && saved(@"xiv.login").length && s.user.text.length)
-            s.password.text = signin_key_load(saved(@"xiv.login"), s.user.text);
+        NSString* page = signin_login_page(saved(@"xiv.server"));
+        if (s && !s.password.text.length && s.remember.on && page && s.user.text.length)
+            s.password.text = signin_key_load(page, s.user.text);
     };
     UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:sheet];
     nav.modalPresentationStyle = UIModalPresentationFormSheet;
@@ -244,26 +228,11 @@ static NSString* saved(NSString* key) { return signin_saved(key); }
 - (void)signIn
 {
     NSString* server = saved(@"xiv.server");
-    NSString* login = saved(@"xiv.login");
     NSString* user = [self.user.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
     NSString* password = self.password.text ?: @"";
     if (!server.length)
     {
         [self showServer];
-        return;
-    }
-    if (!login.length) /* not found yet: ask the server, then sign in */
-    {
-        [self busy:YES status:@"Looking for the server's login page…"];
-        signin_autofill(server, ^(BOOL found) {
-            if (found)
-                [self signIn];
-            else
-            {
-                self.status.textColor = UIColor.systemRedColor;
-                [self busy:NO status:@"The server did not say where its login page is: enter it in the server settings (the gear)."];
-            }
-        });
         return;
     }
     if (!user.length || !password.length)
@@ -275,7 +244,7 @@ static NSString* saved(NSString* key) { return signin_saved(key); }
     [self busy:YES status:nil];
     self.status.textColor = UIColor.secondaryLabelColor;
     self.status.text = @"Signing in…";
-    signin_post(login, user, password, ^(NSString* sid, NSString* why) {
+    signin_post(server, user, password, ^(NSString* sid, NSString* why) {
         if (!sid)
         {
             self.status.textColor = UIColor.systemRedColor;
@@ -296,7 +265,7 @@ static NSString* saved(NSString* key) { return signin_saved(key); }
 
 @end
 
-/* Shows the form until a sign-in succeeds; the server's address and the launch argument come back.
+/* Shows the form until a sign-in succeeds; the lobby's host and the launch argument come back.
  * Returns 0 if the window could not be made. */
 int ios_signin(char* server, size_t server_n, char* arg, size_t arg_n)
 {
