@@ -7,6 +7,14 @@
 #include "plat.h"
 #include "vfs.h"
 
+#if !defined(_WIN32)
+#include <dirent.h>
+#include <pthread.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #define MAX_MOUNTS 16
 
 static char g_cwd[512] = "C:\\";
@@ -14,6 +22,7 @@ static struct
 {
     char guest[256];
     char host[512];
+    int fix_case; /* the host folder is case-sensitive: names are matched to the guest's ignoring case */
 } g_mounts[MAX_MOUNTS];
 static unsigned g_nmounts;
 
@@ -35,6 +44,14 @@ void vfs_mount(const char* guest_prefix, const char* host_prefix)
     {
         vfs_full_path(guest_prefix, g_mounts[g_nmounts].guest, sizeof g_mounts[0].guest);
         snprintf(g_mounts[g_nmounts].host, sizeof g_mounts[0].host, "%s", host_prefix);
+#if defined(_WIN32)
+        g_mounts[g_nmounts].fix_case = 0;
+#elif defined(_PC_CASE_SENSITIVE)
+        /* macOS volumes are mostly not (the game's own case works there); an iPhone's are */
+        g_mounts[g_nmounts].fix_case = pathconf(host_prefix, _PC_CASE_SENSITIVE) != 0;
+#else
+        g_mounts[g_nmounts].fix_case = 1;
+#endif
         g_nmounts++;
     }
 }
@@ -134,6 +151,102 @@ static int to_utf8(const char* in, char* out, size_t n)
     return 1;
 }
 
+/* --- case on case-sensitive hosts ----------------------------------------------------------------
+ * Windows paths are case-insensitive and the game asks for names in its own case (4e.dat for the
+ * patch's 4E.DAT). On a case-sensitive host each component that is not there as asked is looked
+ * up in its folder ignoring case. Resolved paths are kept, so a file the game opens again costs one
+ * lookup; a path that does not resolve is left as asked (a file being made, or one that is not
+ * there), and is not kept: it may exist later. */
+#if !defined(_WIN32)
+#define CASE_SLOTS 8192
+static struct
+{
+    char *asked, *found;
+} g_case[CASE_SLOTS];
+static pthread_mutex_t g_case_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t case_hash(const char* s)
+{
+    uint32_t h = 2166136261u;
+    for (; *s; ++s)
+        h = (h ^ (unsigned char)*s) * 16777619u;
+    return h;
+}
+
+static void fix_case(char* path, size_t n, size_t root)
+{
+    struct stat st;
+    if (lstat(path, &st) == 0)
+        return;
+    uint32_t h = case_hash(path) % CASE_SLOTS;
+    pthread_mutex_lock(&g_case_lock);
+    for (uint32_t i = 0; i < 8 && g_case[(h + i) % CASE_SLOTS].asked; ++i)
+        if (!strcmp(g_case[(h + i) % CASE_SLOTS].asked, path))
+        {
+            snprintf(path, n, "%s", g_case[(h + i) % CASE_SLOTS].found);
+            pthread_mutex_unlock(&g_case_lock);
+            return;
+        }
+    pthread_mutex_unlock(&g_case_lock);
+    char asked[1400];
+    snprintf(asked, sizeof asked, "%s", path);
+    size_t at = root;
+    while (path[at] == '/')
+        ++at;
+    while (path[at])
+    {
+        size_t end = at;
+        while (path[end] && path[end] != '/')
+            ++end;
+        char keep = path[end];
+        path[end] = 0;
+        if (lstat(path, &st) != 0)
+        {
+            /* the folder it is in, and a name there that differs only in case */
+            char saved = path[at - 1];
+            path[at - 1] = 0;
+            DIR* d = opendir(at - 1 > 0 ? path : "/");
+            path[at - 1] = saved;
+            int found = 0;
+            if (d)
+            {
+                struct dirent* e;
+                while ((e = readdir(d)))
+                    if (strlen(e->d_name) == end - at && !strcasecmp(e->d_name, path + at))
+                    {
+                        memcpy(path + at, e->d_name, end - at);
+                        found = 1;
+                        break;
+                    }
+                closedir(d);
+            }
+            if (!found)
+            {
+                path[end] = keep;
+                snprintf(path, n, "%s", asked); /* not there in any case: as asked */
+                return;
+            }
+        }
+        path[end] = keep;
+        at = keep ? end + 1 : end;
+    }
+    pthread_mutex_lock(&g_case_lock);
+    for (uint32_t i = 0; i < 8; ++i)
+    {
+        uint32_t k = (h + i) % CASE_SLOTS;
+        if (!g_case[k].asked || i == 7)
+        {
+            free(g_case[k].asked);
+            free(g_case[k].found);
+            g_case[k].asked = strdup(asked);
+            g_case[k].found = strdup(path);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_case_lock);
+}
+#endif
+
 /* --- DAT overlays --------------------------------------------------------------------------------- */
 
 /* One file an overlay supplies: its key (lower case, from the ROM or sound folder on, '\'
@@ -162,7 +275,7 @@ static Overlay* ov_slot(const char* key)
             return &g_ov[i];
 }
 
-static char* dup(const char* s)
+static char* str_dup(const char* s)
 {
     size_t l = strlen(s) + 1;
     char* d = (char*)malloc(l);
@@ -187,8 +300,8 @@ static int ov_add(const char* key, const char* host)
     Overlay* s = ov_slot(key);
     if (s->key)
         return 0;
-    s->key = dup(key);
-    s->host = dup(host);
+    s->key = str_dup(key);
+    s->host = str_dup(host);
     g_ov_n++;
     return 1;
 }
@@ -296,7 +409,7 @@ unsigned vfs_add_overlay(const char* host_dir, void (*report)(const char* name, 
             continue;
         if (n == cap)
             names = (char**)realloc(names, (cap = cap ? cap * 2 : 16) * sizeof *names);
-        names[n++] = dup(e);
+        names[n++] = str_dup(e);
     }
     plat_dir_close(d);
     qsort(names, n, sizeof *names, by_name);
@@ -383,7 +496,13 @@ int vfs_host_path(const char* guest, char* host, size_t n)
         for (char* p = mapped; *p; ++p)
             if (*p == '\\')
                 *p = plat_path_sep;
-    return to_utf8(mapped, host, n);
+    if (!to_utf8(mapped, host, n))
+        return 0;
+#if !defined(_WIN32)
+    if (best >= 0 && g_mounts[best].fix_case)
+        fix_case(host, n, strlen(g_mounts[best].host));
+#endif
+    return 1;
 }
 
 int vfs_is_virtual_dir(const char* guest)
