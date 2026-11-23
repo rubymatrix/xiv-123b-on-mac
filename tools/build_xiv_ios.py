@@ -4,7 +4,7 @@
         compile the runtime, the host shims and SDL3 for iOS without the game: a check that the
         sources build for iOS, before a patched ffxivgame.exe is at hand
   python3 tools/build_xiv_ios.py app --exe <ffxivgame.exe> [--sdk ...] [--bundle-id id]
-        [--sign-identity name] [--profile file.mobileprovision]
+        [--sign-identity name] [--profile file.mobileprovision] [--login-host host]
         build/ios-<sdk>/FINAL FANTASY XIV.app
   python3 tools/build_xiv_ios.py run --exe <ffxivgame.exe> [--device name] [-- XIV_X=value ...]
         the simulator build, installed on a simulator (booted, else the named or the first iPad) and
@@ -21,6 +21,11 @@ xivboot_main. The translation keeps ThinLTO. A simulator build is signed ad hoc.
 a provisioning profile for the bundle id that allows the entitlements below; the ones it does not
 grant are dropped. The game folder goes in the app's Documents (UIFileSharingEnabled): see
 docs/ios-port.md.
+
+--login-host <host> (repeatable; install and run take it too): the login server's host name or IP
+address. Its login page is plain http (/account/content/ffxivlogin), so App Transport Security lets
+plain http through to that host only (NSExceptionDomains), and to the local network; every other
+load keeps ATS's rules. Without it only a server on the local network can sign in.
 
 XIV_IOS_GUEST_BASE=<hex>|none: the guest window's fixed host address (default build_xiv.py's
 0x20000000000); none builds without RT_GUEST_FIXED (runtime/guest.h).
@@ -206,7 +211,26 @@ def xivboot(t, exe):
     return out
 
 
-def info_plist(t):
+def transport_security(hosts):
+    """App Transport Security for the sign-in: plain http to the login hosts and the local network only"""
+    ats = {'NSAllowsLocalNetworking': True}
+    if hosts:
+        ats['NSExceptionDomains'] = {h: {'NSExceptionAllowsInsecureHTTPLoads': True} for h in hosts}
+    return ats
+
+
+def login_hosts(values):
+    """--login-host values as bare hosts: no scheme, port or path"""
+    out = []
+    for v in values or []:
+        h = v.split('://', 1)[-1].split('/', 1)[0]
+        h = h.rsplit(':', 1)[0] if h.count(':') == 1 else h
+        if h and h not in out:
+            out.append(h)
+    return out
+
+
+def info_plist(t, hosts=()):
     return {
         'CFBundleExecutable': EXE_NAME,
         'CFBundleIdentifier': t.bundle_id,
@@ -234,7 +258,7 @@ def info_plist(t):
         'GCSupportsControllerUserInteraction': True,
         'UIApplicationSupportsIndirectInputEvents': True,  # a mouse or trackpad's pointer and clicks
         # the sign-in posts to the server's login page, which a private server serves over plain http
-        'NSAppTransportSecurity': {'NSAllowsArbitraryLoads': True},
+        'NSAppTransportSecurity': transport_security(hosts),
         'GCSupportedGameControllers': [{'ProfileName': 'ExtendedGamepad'}],
     }
 
@@ -281,7 +305,7 @@ def app(t, a):
     shutil.rmtree(bundle, ignore_errors=True)
     os.makedirs(bundle)
     shutil.copy(exe, os.path.join(bundle, EXE_NAME))
-    info = info_plist(t)
+    info = info_plist(t, login_hosts(a.login_host))
     try:
         info.update(app_icon(t, bundle, a.exe))
     except (subprocess.CalledProcessError, OSError) as e:
@@ -396,6 +420,7 @@ def main():
     ap.add_argument('--profile')
     ap.add_argument('--device', help='simulator name for run, device name for install')
     ap.add_argument('--bundle-id', default=APP_ID)
+    ap.add_argument('--login-host', action='append', help='the login server (repeatable): plain http is allowed to it only')
     argv = sys.argv[1:]
     env_args = argv[argv.index('--') + 1:] if '--' in argv else []
     a = ap.parse_args(argv[:argv.index('--')] if '--' in argv else argv)
