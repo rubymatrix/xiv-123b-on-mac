@@ -1,6 +1,6 @@
 """Vendor SDL3 into third_party/, so a player's Mac needs only clang to build it.
 
-  python3 tools/vendor.py [sdl3 ...]
+  python3 tools/vendor.py [sdl3|sdl3-ios ...]
 
 For the maintainer, not the player: needs cmake and network. For each library it downloads the
 pinned release (checked against its SHA-256), configures it once with cmake to learn the exact
@@ -41,6 +41,27 @@ LIBS = {
         'public': ['include'],
         'frameworks': ['CoreMedia', 'CoreVideo', 'Cocoa', 'IOKit', 'ForceFeedback', 'Carbon', 'CoreAudio',
                        'AudioToolbox', 'AVFoundation', 'Foundation', 'GameController', 'Metal', 'QuartzCore'],
+        'weak_frameworks': ['UniformTypeIdentifiers', 'CoreHaptics'],
+    },
+    # the same release for iPhone (tools/build_ios.py): UIKit + Metal view, CoreAudio, GameController, and
+    # virtual joysticks (the touch controls' gamepad, host/ios_touch.c).
+    # One tree serves the device and the simulator; TARGET_OS_SIMULATOR picks at compile time.
+    'sdl3-ios': {
+        'version': '3.4.16',
+        'url': 'https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-3.4.16.tar.gz',
+        'sha256': '7322236cd12090c3eb40b9728be4d49c76f66ad17d04369584d4ecad5cf77c68',
+        'license': ['LICENSE.txt'],
+        'cmake': ['-DSDL_SHARED=OFF', '-DSDL_STATIC=ON', '-DSDL_TESTS=OFF', '-DSDL_EXAMPLES=OFF', '-DSDL_INSTALL=OFF',
+                  '-DSDL_CAMERA=OFF', '-DSDL_GPU=OFF', '-DSDL_RENDER=OFF', '-DSDL_SENSOR=OFF', '-DSDL_DIALOG=OFF',
+                  '-DSDL_TRAY=OFF', '-DSDL_OPENGL=OFF', '-DSDL_OPENGLES=OFF', '-DSDL_VULKAN=OFF',
+                  '-DSDL_DISKAUDIO=OFF', '-DSDL_DUMMYAUDIO=OFF', '-DSDL_DUMMYVIDEO=OFF', '-DSDL_OFFSCREEN=OFF',
+                  '-DSDL_HIDAPI=ON', '-DSDL_HIDAPI_JOYSTICK=OFF', '-DSDL_VIRTUAL_JOYSTICK=ON', '-DSDL_DEPS_SHARED=OFF', '-DCMAKE_SYSTEM_NAME=iOS',
+                  '-DCMAKE_OSX_ARCHITECTURES=arm64', '-DCMAKE_OSX_DEPLOYMENT_TARGET=17.0'],
+        # the trial build's target (vendor() otherwise compiles for macOS)
+        'trial': ['-target', 'arm64-apple-ios17.0', '-isysroot', 'iphoneos'],
+        'public': ['include'],
+        'frameworks': ['UIKit', 'Foundation', 'CoreGraphics', 'CoreAudio', 'AudioToolbox', 'AVFoundation',
+                       'GameController', 'Metal', 'QuartzCore'],
         'weak_frameworks': ['UniformTypeIdentifiers', 'CoreHaptics'],
     },
 }
@@ -109,13 +130,18 @@ def vendor(name, work):
     print('%s: trial build' % name)
     objs = os.path.join(work, 'obj-' + name)
     os.makedirs(objs)
+    target = ['-mmacosx-version-min=12.0']
+    if 'trial' in lib:  # another SDK: its sysroot's path from xcrun
+        target = [subprocess.run(['xcrun', '--sdk', t, '--show-sdk-path'], capture_output=True, text=True,
+                                 check=True).stdout.strip() if p == '-isysroot' else t
+                  for p, t in zip([None] + lib['trial'], lib['trial'])]
     jobs = []
     for n, key in enumerate(order):
         inc, after, flags = key
         for f in groups[key]:
             arc = ['-fobjc-arc'] if f.endswith('.m') else []
             o = os.path.join(objs, '%d_%s.o' % (n, f.replace('/', '_')))
-            jobs.append(['clang', '-O2', '-w', '-mmacosx-version-min=12.0'] + list(flags) + arc
+            jobs.append(['clang', '-O2', '-w'] + target + list(flags) + arc
                         + ['-I' + os.path.join(src if not d.startswith('gen/') else bld, d[4:] if d.startswith('gen/') else d)
                            for d in inc]
                         + sum((['-idirafter', os.path.join(src, d)] for d in after), [])

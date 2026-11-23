@@ -19,7 +19,10 @@
 #include <stdlib.h>
 #include <unistd.h>
 #if defined(__APPLE__)
-#include <libproc.h>
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+#include <libproc.h> /* not in the iOS SDK */
 #endif
 #include <string.h>
 
@@ -35,15 +38,20 @@
 
 void app_icon_from_image(uint32_t base); /* app_icon.m */
 
+/* XIV_CONFIG_SIZE=<w>x<h>: the first config.sys's window size instead of 2112x1188 (the iOS entry
+ * sets it from the screen, tests/xivboot_ios.c) */
 static void write_config_sys(const char* path)
 {
-    static const uint32_t fields[24] = {
+    uint32_t fields[24] = {
         0x20120419, /* magic */
         0, 0xD800, 0,
         0,          /* display mode: windowed */
         2112, 1188, /* window size */
         7, 4, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 1,
     };
+    unsigned w = 0, h = 0;
+    if (getenv("XIV_CONFIG_SIZE") && sscanf(getenv("XIV_CONFIG_SIZE"), "%ux%u", &w, &h) == 2 && w >= 640 && h >= 360)
+        fields[5] = w, fields[6] = h;
     uint8_t buf[0x2AC] = { 0 };
     for (int i = 0; i < 24; i++)
         for (int b = 0; b < 4; b++)
@@ -56,13 +64,38 @@ static void write_config_sys(const char* path)
     {
         fwrite(buf, 1, sizeof buf, f);
         fclose(f);
-        printf("config.sys: wrote the defaults (2112x1188 window) to %s\n", path);
+        printf("config.sys: wrote the defaults (%ux%u window) to %s\n", (unsigned)fields[5], (unsigned)fields[6], path);
     }
+}
+
+/* The first window size when nothing sets XIV_CONFIG_SIZE: the largest 16:9 size, in points (the
+ * window is made in points), within nine tenths of the main display's usable area, so it fits
+ * beside the menu bar and the Dock. 2112x1188 when the display cannot be read. */
+static void fit_config_size(void)
+{
+    if (getenv("XIV_CONFIG_SIZE") || !SDL_InitSubSystem(SDL_INIT_VIDEO))
+        return;
+    SDL_Rect r;
+    if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &r) && r.w > 0 && r.h > 0)
+    {
+        int w = r.w * 9 / 10, h = r.h * 9 / 10;
+        if (w * 9 > h * 16)
+            w = h * 16 / 9;
+        w &= ~7;
+        h = w * 9 / 16;
+        if (w >= 640 && h >= 360) /* the smallest worth playing at */
+        {
+            char size[32];
+            snprintf(size, sizeof size, "%dx%d", w, h);
+            setenv("XIV_CONFIG_SIZE", size, 0);
+        }
+    }
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 
 /* With no config.sys (what ffxivconfig.exe writes) the game opens a 1280x720 window. The first
  * start here writes one instead: the game's own defaults (FUN_00405c90, decomp/docs/config_sys.md)
- * but a 2112x1188 window, 1920x1080 and a tenth. Edit it with tools/xiv_config.py. */
+ * but a window sized for the main display (fit_config_size). Edit it with tools/xiv_config.py. */
 static void write_default_config(const char* docs)
 {
     char path[1100];
@@ -75,7 +108,10 @@ static void write_default_config(const char* docs)
     if (f)
         fclose(f);
     else
+    {
+        fit_config_size();
         write_config_sys(path);
+    }
 
     /* config.pad: the gamepad ffxivconfig.exe picked. With none the game opens no gamepad at all
      * (FUN_00d33630 matches each DirectInput device's instance and product GUID against it), so
@@ -163,10 +199,21 @@ extern void (*g9_pace_hook)(uint32_t fps); /* gfx9.h */
 uint64_t g9_pace_refresh_ns(void);
 static void xiv_pace_fps(uint32_t fps) { wr32(0x137DF00, fps); }
 
+/* The frame cap while the game runs (the iOS entry's, from the phone's state): the render loop's
+ * limiter reads it each frame; 0 uncaps */
+void xivboot_set_fps_cap(int fps)
+{
+    wr32(0x137DF00, fps > 0 ? (uint32_t)fps : 100000u);
+}
+
+/* called each turn of the main thread's loop once SDL is up (the iOS entry's touch controls,
+ * tests/xivboot_ios.c), on the main thread */
+void (*xivboot_main_hook)(void);
+
 static void quit_signal(int sig, siginfo_t* info, void* ctx)
 {
     char path[1024] = "";
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
     proc_pidpath(info->si_pid, path, sizeof path);
 #endif
     char line[1200];
@@ -176,8 +223,16 @@ static void quit_signal(int sig, siginfo_t* info, void* ctx)
     _Exit(0);
 }
 
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+int mac_launch(int* argc, char*** argv); /* mac_signin.m: opened from Finder, the game folder and the sign-in */
+#endif
+
 int main(int argc, char** argv)
 {
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+    if (!mac_launch(&argc, &argv))
+        return 0;
+#endif
     if (argc < 2)
     {
         printf("usage: xivboot <ffxivgame.exe> [game folder] [registry .reg]\n");
@@ -268,8 +323,8 @@ int main(int argc, char** argv)
     }
 
     /* The frame rate target, 60 (XIV_FPSCAP=<fps>; 0 uncaps): the render loop's limiter
-     * (frame_rate_target in the apply overlay) and the logic loop (worker_tick_period, which also
-     * advances the interface's animations) both run at it. */
+     * (frame_rate_target in the apply overlay). The logic loop (worker_tick_period, which also
+     * advances the interface's animations) runs at XIV_TICKHZ, 30 unless set. */
     {
         const char* cap = getenv("XIV_FPSCAP");
         int fps = cap ? atoi(cap) : 60;
@@ -284,8 +339,11 @@ int main(int argc, char** argv)
             k32_quantize_qpc_at(0xA4FE24, g9_pace_refresh_ns);
         /* a frame that ran over its period: the limiter's Sleep(1) becomes a yield */
         k32_skip_sleep_at(0x4E8F72);
+        /* the logic loop at 30 Hz (XIV_TICKHZ), the game's own: at 60 its menus miss the pad's
+         * presses (a press is a change between two polls, and they read every other one), so only
+         * a held D-pad's repeats moved them. The keyboard's presses are not lost either way. */
         const char* hz = getenv("XIV_TICKHZ");
-        int tick = hz && atoi(hz) > 0 ? atoi(hz) : (fps > 0 ? fps : 120);
+        int tick = hz && atoi(hz) > 0 ? atoi(hz) : 30;
         wr32(0x137DF04, 1000000u / (uint32_t)(tick > 1000 ? 1000 : tick));
         /* and its sleeps paced exactly: the interface's animations advance on this loop */
         k32_pace_sleep_at(0xCC6D4C, 1000000000ull / (uint32_t)(tick > 1000 ? 1000 : tick));
@@ -350,6 +408,8 @@ int main(int argc, char** argv)
     {
         SDL_PumpEvents();
         user32_main_tick();
+        if (xivboot_main_hook)
+            xivboot_main_hook();
         SDL_Delay(1);
     }
     return 0;

@@ -41,8 +41,14 @@ typedef struct Fiber
  * then resumes the stack at load. A new fiber's stack is made to resume in fiber_trampoline, which
  * calls xiv_fiber_entry(the Fiber in x19). */
 void fiber_swap(void** save, void* load);
+/* C names in assembly: Mach-O prefixes an underscore, ELF (Linux, Android) does not */
+#if defined(__APPLE__)
+#define ASM_NAME(n) "_" #n
+#else
+#define ASM_NAME(n) #n
+#endif
 __asm__(
-    ".text\n.p2align 2\n.globl _fiber_swap\n_fiber_swap:\n"
+    ".text\n.p2align 2\n.globl " ASM_NAME(fiber_swap) "\n" ASM_NAME(fiber_swap) ":\n"
     "  sub sp, sp, #160\n"
     "  stp x19, x20, [sp, #0]\n  stp x21, x22, [sp, #16]\n  stp x23, x24, [sp, #32]\n"
     "  stp x25, x26, [sp, #48]\n  stp x27, x28, [sp, #64]\n  stp x29, x30, [sp, #80]\n"
@@ -52,8 +58,8 @@ __asm__(
     "  ldp x25, x26, [sp, #48]\n  ldp x27, x28, [sp, #64]\n  ldp x29, x30, [sp, #80]\n"
     "  ldp d8, d9, [sp, #96]\n  ldp d10, d11, [sp, #112]\n  ldp d12, d13, [sp, #128]\n  ldp d14, d15, [sp, #144]\n"
     "  add sp, sp, #160\n  ret\n"
-    ".globl _fiber_trampoline\n_fiber_trampoline:\n"
-    "  mov x0, x19\n  bl _xiv_fiber_entry\n  brk #0\n");
+    ".globl " ASM_NAME(fiber_trampoline) "\n" ASM_NAME(fiber_trampoline) ":\n"
+    "  mov x0, x19\n  bl " ASM_NAME(xiv_fiber_entry) "\n  brk #0\n");
 void fiber_trampoline(void);
 
 static Fiber* g_fibers[MAX_FIBERS];

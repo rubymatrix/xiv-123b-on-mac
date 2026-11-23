@@ -1957,6 +1957,34 @@ static void Dev_SetFVF(Guest* g)
 }
 static void Dev_GetFVF(Guest* g) { wr32(ARG(1), g_dev.st.fvf); RET(D3D_OK, 2); }
 
+/* XIV_SHADER_DUMP=<folder>: each shader the game makes, its D3D9 bytecode as <fnv1a>.vs or .ps (once
+ * each): what a shader translator is tried against offline (tools/shader_check.py) */
+static void dump_shader(int vertex, const uint32_t* tokens, uint32_t n)
+{
+    static const char* dir = (const char*)1;
+    if (dir == (const char*)1)
+        dir = getenv("XIV_SHADER_DUMP");
+    if (!dir)
+        return;
+    uint32_t h = 2166136261u;
+    const uint8_t* b = (const uint8_t*)tokens;
+    for (uint32_t i = 0; i < 4 * n; ++i)
+        h = (h ^ b[i]) * 16777619u;
+    char path[1100];
+    snprintf(path, sizeof path, "%s/%08x.%s", dir, h, vertex ? "vs" : "ps");
+    FILE* f = fopen(path, "rb");
+    if (f)
+    {
+        fclose(f);
+        return;
+    }
+    if ((f = fopen(path, "wb")))
+    {
+        fwrite(tokens, 4, n, f);
+        fclose(f);
+    }
+}
+
 static uint32_t create_shader(int kind, uint32_t code, uint32_t out)
 {
     uint32_t n = 0;
@@ -1975,6 +2003,7 @@ static uint32_t create_shader(int kind, uint32_t code, uint32_t out)
     o->tokens = gheap_alloc(4 * n, 0);
     memcpy(GUEST_PTR(o->tokens), GUEST_PTR(code), 4 * n);
     o->shader = g9_shader_create((const uint32_t*)GUEST_PTR(o->tokens), n);
+    dump_shader(kind == O_VS, (const uint32_t*)GUEST_PTR(o->tokens), n);
     wr32(out, p);
     return D3D_OK;
 }

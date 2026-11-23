@@ -95,6 +95,7 @@ typedef struct Sock
     uint32_t pending;     /* network events recorded, not yet enumerated */
     uint32_t enabled;     /* which events may be recorded again */
     int errors[10];       /* iErrorCode by FD_*_BIT */
+    int nlog;             /* lines XIV_NETLOG wrote for it */
     int tap;              /* packet tap for the scripted input: 0 not decided, 1 game server, 2 no */
 } Sock;
 
@@ -145,6 +146,23 @@ static uint32_t wsa_error(int e)
 }
 
 static void fail(void) { gt_set_error(wsa_error(host_errno())); }
+
+/* XIV_NETLOG=1: each TCP connection's connect, its first sends and receives, its errors and its
+ * close, for finding where a sign-in stops */
+void rt_log(const char* fmt, ...);
+static int netlog(void)
+{
+    static int on = -1;
+    if (on < 0)
+        on = getenv("XIV_NETLOG") != NULL;
+    return on;
+}
+static int peer_port(host_sock h)
+{
+    struct sockaddr_in peer;
+    socklen_t pl = sizeof peer;
+    return getpeername(h, (struct sockaddr*)&peer, &pl) == 0 ? ntohs(peer.sin_port) : 0;
+}
 
 static Sock* sock(uint32_t s)
 {
@@ -263,6 +281,8 @@ static void sh_closesocket(Guest* g)
     Sock* s = sock(ARG(0));
     if (!s)
         RET(GUEST_SOCKET_ERROR, 1);
+    if (netlog())
+        rt_log("[net] socket %x (port %d) closed by the game\n", ARG(0), peer_port(s->h));
     lock();
     host_sock h = s->h;
     s->used = 0;
@@ -322,6 +342,10 @@ static void sh_connect(Guest* g)
     int e = host_errno();
     if (!nb)
         gt_lock();
+    if (netlog())
+        rt_log("[net] socket %x connect %u.%u.%u.%u:%u%s: %s (errno %d)\n", ARG(0), ((uint8_t*)&a.sin_addr)[0],
+            ((uint8_t*)&a.sin_addr)[1], ((uint8_t*)&a.sin_addr)[2], ((uint8_t*)&a.sin_addr)[3], ntohs(a.sin_port),
+            nb ? " (nonblocking)" : "", r == 0 ? "connected" : "not yet", r == 0 ? 0 : e);
     if (r != 0)
     {
         gt_set_error(wsa_error(e));
@@ -456,6 +480,9 @@ static void sh_send(Guest* g)
     int e = host_errno();
     if (!nb)
         gt_lock();
+    if (netlog() && (n < 0 ? wsa_error(e) != WSAEWOULDBLOCK : s->nlog < 12))
+        rt_log("[net] socket %x (port %d) send %u: %d%s (errno %d)\n", ARG(0), peer_port(s->h), ARG(2), n,
+            n < 0 ? " failed" : "", n < 0 ? e : 0), s->nlog++;
     if (n < 0)
     {
         gt_set_error(wsa_error(e));
@@ -501,6 +528,9 @@ static void sh_recv(Guest* g)
     if (!nb)
         gt_lock();
     io_done(s, FD_READ, 0);
+    if (netlog() && (n < 0 ? wsa_error(e) != WSAEWOULDBLOCK : n == 0 || s->nlog < 12))
+        rt_log("[net] socket %x (port %d) recv %u: %d%s (errno %d)\n", ARG(0), peer_port(s->h), ARG(2), n,
+            n < 0 ? " failed" : n == 0 ? " (the peer closed)" : "", n < 0 ? e : 0), s->nlog++;
     if (n < 0)
     {
         gt_set_error(wsa_error(e));
@@ -988,7 +1018,9 @@ static void watcher(void* arg)
     for (;;)
     {
         fd_set rd, wr, ex;
-        FD_ZERO(&rd), FD_ZERO(&wr), FD_ZERO(&ex);
+        FD_ZERO(&rd); /* statements: bionic's FD_ZERO is a do-while */
+        FD_ZERO(&wr);
+        FD_ZERO(&ex);
         host_sock maxfd = 0;
         int any = 0;
         lock();

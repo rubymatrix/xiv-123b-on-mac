@@ -324,7 +324,25 @@ static void sh_SetProcessAffinityMask(Guest* g) { RET(1, 2); }
 static void sh_SetThreadAffinityMask(Guest* g) { RET(cpu_mask(), 2); } /* the previous mask */
 static void sh_SetThreadIdealProcessor(Guest* g) { RET(0, 2); }
 static void sh_OpenThread(Guest* g) { RET(0xFFFFFFFEu, 3); } /* the current-thread pseudo handle */
-static void sh_SwitchToThread(Guest* g) { int held = gt_release(); plat_yield(); gt_reacquire(held); RET(1, 0); }
+/* The game calls SwitchToThread in a loop while it waits for another thread. On Windows the call gives
+ * the core to whoever else is ready; here a yield returns at once when nothing else is runnable, and
+ * the loop kept a fast core at 100% (two thirds of the game's main thread in the world on Android,
+ * heat the GPU shares). Past a burst of calls a thread sleeps a millisecond instead. */
+static void sh_SwitchToThread(Guest* g)
+{
+    static RT_TLS uint32_t burst;
+    static RT_TLS uint64_t last;
+    uint64_t now = rt_monotonic_ns();
+    burst = now - last < 2000000u ? burst + 1 : 0;
+    last = now;
+    int held = gt_release();
+    if (burst >= 64)
+        plat_sleep_ms(1);
+    else
+        plat_yield();
+    gt_reacquire(held);
+    RET(1, 0);
+}
 static void sh_SleepEx(Guest* g)
 {
     uint32_t ms = ARG(0);

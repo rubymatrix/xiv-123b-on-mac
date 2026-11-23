@@ -5,6 +5,16 @@
  * icon as an RT_GROUP_ICON (a directory of sizes) and one RT_ICON per size; put back together they
  * are a .ico file, which NSImage reads. The icon comes from the player's own exe, at run time.
  */
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include <stdint.h>
+
+/* iOS: the app's icon is its bundle's (tools/build_xiv_ios.py); nothing to set at run time */
+void app_icon_from_image(uint32_t base)
+{
+    (void)base;
+}
+#else
 #import <AppKit/AppKit.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,3 +99,4 @@ void app_icon_from_image(uint32_t base)
         [image release];
     }
 }
+#endif

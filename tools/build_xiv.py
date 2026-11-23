@@ -62,10 +62,25 @@ PORTABLE = ['runtime/runtime.c', 'runtime/portable/plat_posix.c', 'runtime/porta
 
 
 # Win32 shims on SDL3 (windowing, input, timers, sockets, audio) shared with FFXI.
+# XIV_GFX=null: the back end that draws nothing (gfx9_null.c) in place of Metal, as Android's first builds
 HOST = ['runtime/portable/user32.c', 'runtime/portable/input.c', 'runtime/portable/autoinput.c', 'runtime/portable/ws2.c',
         'runtime/portable/dinput.c', 'runtime/portable/dsound.c', 'runtime/portable/d3d9.c', 'runtime/portable/d3dx9.c', 'runtime/portable/xaudio2.c',
         'runtime/portable/sm_msl.c', 'runtime/portable/gfx9_metal.m']
+if os.environ.get('XIV_GFX') == 'null':
+    HOST = [s for s in HOST if s != 'runtime/portable/gfx9_metal.m'] + ['runtime/portable/gfx9_null.c']
 GFX_LIBS = ['-framework', 'Metal', '-framework', 'QuartzCore', '-framework', 'Foundation', '-weak_framework', 'MetalFX']
+GFX_CFLAGS = []  # for the runtime's objects only, so changing back ends leaves the translated game's alone
+# XIV_GFX=vulkan: the Vulkan back end (gfx9_vulkan.c, shaders by sm_glsl.c and glslang) on MoltenVK, as
+# Android will run it; the loader, MoltenVK and glslang from Homebrew
+# (brew install molten-vk vulkan-loader vulkan-headers glslang)
+if os.environ.get('XIV_GFX') == 'vulkan':
+    BREW = os.environ.get('HOMEBREW_PREFIX', '/opt/homebrew')
+    HOST = [s for s in HOST if s != 'runtime/portable/gfx9_metal.m'] + ['runtime/portable/sm_glsl.c', 'runtime/portable/gfx9_vulkan.c']
+    GFX_CFLAGS = ['-idirafter', BREW + '/include']
+    GFX_LIBS += ['-L' + BREW + '/lib', '-lvulkan', '-lglslang', '-lglslang-default-resource-limits']
+# the game opened from Finder: its folder and the sign-in window (tests/mac_signin.m), with ARC
+SIGNIN = ['tests/mac_signin.m', 'tests/signin_core.m', 'tests/xiv_args.c']
+SIGNIN_LIBS = ['-framework', 'AppKit', '-framework', 'Security']
 
 
 def run(cmd):
@@ -140,8 +155,8 @@ def compile_stale(sources, objdir, extra=(), gen_flags=None):
         src_time = max(os.path.getmtime(os.path.join(ROOT, s)), headers)
         if not os.path.exists(full) or os.path.getmtime(full) < src_time:
             flags = CFLAGS + list(extra) + ((gen_flags or GEN_FLAGS) if s.startswith('generated/') else [])
-            if s.endswith('.m'):  # Objective-C, references counted by hand
-                flags = [f for f in flags if f != '-std=c11'] + ['-fno-objc-arc']
+            if s.endswith('.m'):  # Objective-C, references counted by hand unless the call says ARC
+                flags = [f for f in flags if f != '-std=c11'] + ([] if '-fobjc-arc' in flags else ['-fno-objc-arc'])
             jobs.append(['clang', '-c'] + flags + [s, '-o', obj])
     if jobs:
         print('compiling %d of %d' % (len(jobs), len(sources)), flush=True)
@@ -188,7 +203,7 @@ def translate(exe):
          GEN, '--all', '--wraps', WRAPS] + extra_entries(exe))
 
 
-def xivboot(exe, run_it, extra, debug=False, opt='-O1', pgo=None):
+def xivboot(exe, run_it, extra, debug=False, opt='-O1', pgo=None, hosts=()):
     if not os.path.exists(os.path.join(ROOT, GEN, 'table.c')):
         translate(exe)
     gen = sorted(os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, GEN, '*.c')))
@@ -198,9 +213,10 @@ def xivboot(exe, run_it, extra, debug=False, opt='-O1', pgo=None):
         # binary's debug map points at them, so no dsymutil step is needed.
         objs = compile_stale(gen, 'build/xiv-dbg/gen', gen_flags=[opt, '-g', '-mcpu=apple-m1', '-w'])
         thirdparty.build('sdl3')
-        objs += compile_stale(PORTABLE + HOST + ['tests/xivboot.c'], 'build/xiv-dbg/obj', thirdparty.flags('sdl3'))
+        objs += compile_stale(PORTABLE + HOST + ['tests/xivboot.c'], 'build/xiv-dbg/obj', thirdparty.flags('sdl3') + GFX_CFLAGS)
+        objs += compile_stale(SIGNIN, 'build/xiv-dbg/signin', ['-fobjc-arc', '-I', 'tests'])
         run(['clang', '-o', 'build/xivboot-dbg', '-g', '-mcpu=apple-m1']
-            + objs + thirdparty.libs('sdl3') + GFX_LIBS + ['-lm', '-lpthread'])
+            + objs + thirdparty.libs('sdl3') + GFX_LIBS + SIGNIN_LIBS + ['-lm', '-lpthread'])
         if run_it:
             run(['build/xivboot-dbg', exe] + extra)
         return
@@ -221,7 +237,8 @@ def xivboot(exe, run_it, extra, debug=False, opt='-O1', pgo=None):
         pgo_flags, gendir = ['-fprofile-use=' + prof, '-Wno-profile-instr-out-of-date', '-Wno-profile-instr-unprofiled'], 'build/xiv-pgouse/gen'
     objs = compile_stale(gen, gendir, gen_flags=GEN_FLAGS + pgo_flags)
     thirdparty.build('sdl3')
-    objs += compile_stale(PORTABLE + HOST + ['tests/xivboot.c'], 'build/xiv/obj', thirdparty.flags('sdl3'))
+    objs += compile_stale(PORTABLE + HOST + ['tests/xivboot.c'], 'build/xiv/obj', thirdparty.flags('sdl3') + GFX_CFLAGS)
+    objs += compile_stale(SIGNIN, 'build/xiv/signin', ['-fobjc-arc', '-I', 'tests'])
     # ThinLTO: the translated functions call each other across 291 files; inlining the small ones
     # into their callers needs the whole program (cache: relinks reuse unchanged modules)
     # -U: d3d9.c's profile dump finds the profile runtime only in --pgo gen builds
@@ -230,8 +247,8 @@ def xivboot(exe, run_it, extra, debug=False, opt='-O1', pgo=None):
     inl_flags = ['-Wl,-mllvm,-import-instr-limit=%d' % (int(inl) * 2), '-Wl,-mllvm,-inline-threshold=%s' % inl] if inl else []
     run_lto(['clang', '-o', 'build/xivboot', '-flto=thin', '-O3', '-mcpu=apple-m1', '-Wl,-U,___llvm_profile_write_file'] + pgo_flags + inl_flags + [
              '-Wl,-cache_path_lto,build/xiv/lto-cache', '-Wl,-mllvm,-threads=%d' % (os.cpu_count() or 4)]
-            + objs + thirdparty.libs('sdl3') + GFX_LIBS + ['-lm', '-lpthread'], 'build/xiv/lto-cache', len(gen))
-    xiv_bundle(exe)
+            + objs + thirdparty.libs('sdl3') + GFX_LIBS + SIGNIN_LIBS + ['-lm', '-lpthread'], 'build/xiv/lto-cache', len(gen))
+    xiv_bundle(exe, hosts)
     with open(os.path.join(ROOT, 'build', 'xivboot.sha256'), 'w') as f:  # which ffxivgame.exe (xiv_run.py)
         f.write(sha256(exe) + '\n')
     if run_it:
@@ -303,6 +320,7 @@ XIV_PLIST = '''<?xml version="1.0" encoding="UTF-8"?>
 	<key>LSApplicationCategoryType</key><string>public.app-category.role-playing-games</string>
 	<key>LSSupportsGameMode</key><true/>
 	<key>NSHighResolutionCapable</key><true/>
+	<key>NSAppTransportSecurity</key>@ATS@
 </dict>
 </plist>
 '''
@@ -344,7 +362,36 @@ def exe_icns(exe, out):
                                stderr=subprocess.DEVNULL) == 0
 
 
-def xiv_bundle(game_exe=None):
+def transport_security(hosts):
+    """App Transport Security for the sign-in (tests/signin_core.m): the 1.23b login page is plain http,
+    so plain http is allowed to the login hosts (--login-host) and the local network only"""
+    ats = {'NSAllowsLocalNetworking': True}
+    if hosts:
+        ats['NSExceptionDomains'] = {h: {'NSExceptionAllowsInsecureHTTPLoads': True} for h in hosts}
+    return ats
+
+
+def login_hosts(values):
+    """--login-host values as bare hosts: no scheme, port or path"""
+    out = []
+    for v in values or []:
+        h = v.split('://', 1)[-1].split('/', 1)[0]
+        h = h.rsplit(':', 1)[0] if h.count(':') == 1 else h
+        if h and h not in out:
+            out.append(h)
+    return out
+
+
+def plist_dict(d):
+    """a dict of dicts and booleans as plist XML, on one line"""
+    out = '<dict>'
+    for k, v in d.items():
+        out += '<key>%s</key>' % k.replace('&', '&amp;').replace('<', '&lt;')
+        out += plist_dict(v) if isinstance(v, dict) else '<true/>' if v else '<false/>'
+    return out + '</dict>'
+
+
+def xiv_bundle(game_exe=None, hosts=()):
     """build/xivboot inside an app bundle (a hard link), so macOS sees a game: Game Mode turns on
     when it runs full screen, and it shows ffxivgame.exe's icon. xiv_login.py starts this copy."""
     macos = os.path.join(ROOT, XIV_APP, 'Contents', 'MacOS')
@@ -353,7 +400,7 @@ def xiv_bundle(game_exe=None):
     if os.path.lexists(exe):
         os.remove(exe)
     os.link(os.path.join(ROOT, 'build', 'xivboot'), exe)
-    plist = XIV_PLIST
+    plist = XIV_PLIST.replace('@ATS@', plist_dict(transport_security(hosts)))
     if game_exe and exe_icns(game_exe, os.path.join(ROOT, XIV_APP, 'Contents', 'Resources', 'AppIcon.icns')):
         plist = plist.replace('<key>CFBundleName</key>', '<key>CFBundleIconFile</key><string>AppIcon</string>\n\t<key>CFBundleName</key>')
     with open(os.path.join(ROOT, XIV_APP, 'Contents', 'Info.plist'), 'w') as f:
@@ -370,6 +417,8 @@ def main():
     ap.add_argument('--opt', default='-O1', help='optimization for the translation in --debug builds (-O0 keeps every register local visible but runs slowly)')
     ap.add_argument('--pgo', choices=('gen', 'use'), help='profile-guided optimization: an instrumented build, or one using its profile')
     ap.add_argument('--name', help='exe: which launcher program (ffxivboot, ffxivlogin, ffxivupdater); default from --exe')
+    ap.add_argument('--login-host', action='append',
+                    help="xivboot: the login server's host (repeatable); the app allows plain http to it only")
     ap.add_argument('rest', nargs='*')
     a = ap.parse_args()
     exe = os.path.abspath(a.exe)
@@ -380,7 +429,7 @@ def main():
     elif a.target == 'translate':
         translate(exe)
     else:
-        xivboot(exe, a.run, a.rest, a.debug, a.opt, a.pgo)
+        xivboot(exe, a.run, a.rest, a.debug, a.opt, a.pgo, login_hosts(a.login_host))
 
 
 if __name__ == '__main__':

@@ -1,7 +1,8 @@
 """Sign in to a Garlemald or Project Meteor server and start the recompiled FINAL FANTASY XIV client.
 
   python3 tools/xiv_login.py [--server http://127.0.0.1:54993] [--lobby 127.0.0.1] [--user NAME]
-                             [--signup] [--meteor] [--game <FINAL FANTASY XIV folder>] [-- extra xivboot args]
+                             [--signup] [--meteor|--bahamut|--kodama] [--game <FINAL FANTASY XIV folder>]
+                             [-- extra xivboot args]
 
 --bahamut signs in through Bahamut's JSON auth API (POST /api/v1/sessions on the auth service,
 e.g. --server http://127.0.0.1:8080); the session id it returns is the same 56 hex digits.
@@ -9,6 +10,11 @@ e.g. --server http://127.0.0.1:8080); the session id it returns is the same 56 h
 --meteor signs in through Project Meteor's PHP pages instead (--server is then the site root,
 e.g. http://127.0.0.1:8000): POST login/ answers with a page holding <x-sqexauth sid="<56 hex>">,
 and sign-up posts login_su/create_user.php.
+
+--kodama signs in through the retail login route a Kodama-style login service answers (--server is
+then its root, e.g. http://<host>:17741): POST /oauth/ffxiv/login/login.send with sqexid and
+password answers with window.external.user("login=auth,ok,sid,<56 hex>,..."), or
+"login=auth,ng,err,<message>". Accounts are made in a browser at <server>/oauth/oa/registligt.
 
 The same sign-in Garlemald Client makes (client/src/login): POST the account to the server's
 web front end, which answers with a redirect to ffxiv://login_success?sessionId=<56 hex>. That
@@ -116,6 +122,18 @@ def sign_in_meteor(server, user, password, signup=False):
     return m.group(1)
 
 
+def sign_in_kodama(server, user, password, signup=False):
+    base = server.rstrip('/')
+    if signup:
+        raise SystemExit('make the account in a browser first: %s/oauth/oa/registligt' % base)
+    status, _, body = post(base + '/oauth/ffxiv/login/login.send', {'sqexid': user, 'password': password})
+    m = re.search(r'login=auth,ok,sid,([0-9A-Fa-f]{56})', body)
+    if not m:
+        err = re.search(r'login=auth,ng,err,([^"]*)"', body)
+        raise SystemExit('sign-in refused: %s' % (err.group(1) if err else status))
+    return m.group(1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--server', default='http://127.0.0.1:54993', help="the server's web front end")
@@ -124,6 +142,7 @@ def main():
     ap.add_argument('--signup', action='store_true', help='create the account first')
     ap.add_argument('--bahamut', action='store_true', help="sign in through Bahamut's auth API (--server is then its auth URL, e.g. http://127.0.0.1:8080)")
     ap.add_argument('--meteor', action='store_true', help="sign in through Project Meteor's PHP login pages")
+    ap.add_argument('--kodama', action='store_true', help="sign in through the retail login route (--server is then its root, e.g. http://<host>:17741)")
     ap.add_argument('--game', default=DEFAULT_GAME, help='the FINAL FANTASY XIV folder')
     ap.add_argument('--tick', type=lambda s: int(s, 0), default=xiv_args.DEFAULT_TICK)
     ap.add_argument('--print', action='store_true', help='print the session id and argument; do not start the game')
@@ -131,7 +150,8 @@ def main():
     a = ap.parse_args()
     user = a.user or input('Username: ')
     password = os.environ.get('XIV_PASSWORD') or getpass.getpass('Password: ')
-    session = (sign_in_bahamut if a.bahamut else sign_in_meteor if a.meteor else sign_in)(a.server, user, password, a.signup)
+    how = sign_in_bahamut if a.bahamut else sign_in_meteor if a.meteor else sign_in_kodama if a.kodama else sign_in
+    session = how(a.server, user, password, a.signup)
     arg = xiv_args.build(session, a.tick)
     print('signed in as %s (session %s...)' % (user, session[:8]))
     if a.print:

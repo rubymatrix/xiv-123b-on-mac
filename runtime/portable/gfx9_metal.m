@@ -14,7 +14,12 @@
  * variant: the vertex layout's integer attributes, the outputs the pixel shader reads, alpha test,
  * depth samplers), the vertex layout, the target formats and the blend states.
  */
+#include <TargetConditionals.h>
+/* a drawable's present time and timed presents (XIV_FRAMELOG, XIV_PACE): not in the iOS simulator's SDK */
+#define PRESENT_TIMES (!TARGET_OS_SIMULATOR)
+#if !TARGET_OS_IPHONE
 #import <AppKit/AppKit.h>
+#endif
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <SDL3/SDL.h>
@@ -197,7 +202,7 @@ static uint32_t g_ring_used, g_frame;
 static id<MTLBuffer> g_default_attr; /* (0, 0, 0, 1): what an attribute no stream supplies reads */
 static id<MTLLibrary> g_util;
 static id<MTLRenderPipelineState> g_present_pipe;
-static id<MTLRenderPipelineState> g_text_pipe; /* the FPS counter (XIV_FPS=0 hides it) */
+static id<MTLRenderPipelineState> g_text_pipe; /* the FPS counter (XIV_FPS=1 shows it) */
 static id<MTLSamplerState> g_linear, g_point;
 
 /* the targets */
@@ -383,6 +388,9 @@ typedef struct CoverArgs
 
 static void cover_main(void* p)
 {
+#if TARGET_OS_IPHONE
+    (void)p; /* an iOS app's window always covers the screen */
+#else
     CoverArgs* a = (CoverArgs*)p;
     NSWindow* nw = (__bridge NSWindow*)SDL_GetPointerProperty(SDL_GetWindowProperties(a->w),
         SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
@@ -396,6 +404,7 @@ static void cover_main(void* p)
     }
     else
         [NSApp setPresentationOptions:NSApplicationPresentationDefault];
+#endif
 }
 
 static void cover_screen(SDL_Window* w, int on)
@@ -412,6 +421,19 @@ __attribute__((constructor)) static void cover_register(void)
 
 static void* g_sdl_window;
 
+#if TARGET_OS_IPHONE
+static void touch_init(void); /* gfx9_touch.h */
+#endif
+
+static int layer_synced(void)
+{
+#if TARGET_OS_IPHONE
+    return 1;
+#else
+    return g_layer.displaySyncEnabled;
+#endif
+}
+
 int g9_init(void* sdl_window, int vsync)
 {
     @autoreleasepool
@@ -426,7 +448,11 @@ int g9_init(void* sdl_window, int vsync)
         g_layer.device = g_dev;
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_layer.framebufferOnly = YES;
+#if TARGET_OS_IPHONE
+        (void)vsync; /* iOS presents on the display's refresh; the layer has no switch for it */
+#else
         g_layer.displaySyncEnabled = vsync ? YES : NO;
+#endif
         int w = 0, h = 0;
         SDL_GetWindowSizeInPixels((SDL_Window*)sdl_window, &w, &h);
         g_layer.drawableSize = CGSizeMake(w > 0 ? w : 1280, h > 0 ? h : 720);
@@ -452,8 +478,8 @@ int g9_init(void* sdl_window, int vsync)
         pd.fragmentFunction = [[g_util newFunctionWithName:@"util_copy"] autorelease];
         pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_present_pipe = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
-        const char* fps = getenv("XIV_FPS");
-        if (!fps || strcmp(fps, "0"))
+        const char* fps = getenv("XIV_FPS"); /* the FPS counter: XIV_FPS=1 shows it */
+        if (fps && strcmp(fps, "0"))
         {
             pd.fragmentFunction = [[g_util newFunctionWithName:@"util_text"] autorelease];
             pd.colorAttachments[0].blendingEnabled = YES;
@@ -462,6 +488,9 @@ int g9_init(void* sdl_window, int vsync)
             g_text_pipe = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
         }
         rt_log("[gfx9] Metal on %s\n", g_dev.name.UTF8String);
+#if TARGET_OS_IPHONE
+        touch_init();
+#endif
         return g_present_pipe != nil;
     }
 }
@@ -1475,8 +1504,15 @@ static void draw_prim(MTLPrimitiveType* mp, uint32_t prim, uint32_t count, uint3
 static uint32_t g_draw_errors;
 
 #include "gfx9_fx.h"
+#if __has_include(<MetalFX/MetalFX.h>)
 #include "gfx9_upscale.h"
+#else
+#include "gfx9_upscale_none.h" /* the iOS simulator: no MetalFX */
+#endif
 #include "gfx9_navdraw.h"
+#if TARGET_OS_IPHONE
+#include "gfx9_touch.h" /* tests/ios_touch.c's controls */
+#endif
 
 /* --- one-frame draw trace (XIV_GFXTRACE=<dir>; touch <dir>/req to trace the next frame) ---------
  * <dir>/draws.txt: a line per draw (shaders, targets, blend, samplers); <dir>/consts.bin: per draw
@@ -2155,6 +2191,7 @@ static void framelog(id<CAMetalDrawable> drawable)
     if (last_cpu)
         g_fl_cpu[g_fl_ncpu++ % FL_N] = now - last_cpu;
     last_cpu = now;
+#if PRESENT_TIMES
     if (drawable)
         [drawable addPresentedHandler:^(id<MTLDrawable> d) {
             /* on one Core Animation queue, in present order */
@@ -2169,6 +2206,9 @@ static void framelog(id<CAMetalDrawable> drawable)
                 g_fl_shown[__atomic_fetch_add(&g_fl_nshown, 1, __ATOMIC_RELAXED) % FL_N] = t - last;
             last = t;
         }];
+#else
+    (void)drawable;
+#endif
     if (g_fl_ncpu < FL_N)
         return;
     float hz = 0;
@@ -2286,10 +2326,14 @@ void g9_present(G9Tex* bb)
         if (g_framelog)
             framelog(drawable);
         if (g_pace < 0)
-            g_pace = g_layer.displaySyncEnabled && getenv("XIV_PACE") && strcmp(getenv("XIV_PACE"), "0");
+            g_pace = layer_synced() && getenv("XIV_PACE") && strcmp(getenv("XIV_PACE"), "0");
+#if !PRESENT_TIMES
+        g_pace = 0; /* no present times to pace by */
+#endif
         if (g_pace)
         {
             pace_update();
+#if PRESENT_TIMES
             if (drawable)
                 [drawable addPresentedHandler:^(id<MTLDrawable> d) {
                     static double last;
@@ -2299,6 +2343,7 @@ void g9_present(G9Tex* bb)
                     if (t)
                         last = t;
                 }];
+#endif
         }
         if (drawable && bb)
         {
@@ -2335,10 +2380,18 @@ void g9_present(G9Tex* bb)
                 [e setFragmentBytes:info length:16 atIndex:1];
                 [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
             }
+#if TARGET_OS_IPHONE
+            {
+                CGFloat pw = g_layer.bounds.size.width;
+                draw_touch(e, drawable.texture.width, drawable.texture.height, pw > 0 ? (float)(dw / pw) : 1.0f);
+            }
+#endif
             [e endEncoding];
+#if PRESENT_TIMES
             if (g_pace && g_refresh > 0)
                 [cmd() presentDrawable:drawable afterMinimumDuration:(g_pace_k - 0.5) * g_refresh];
             else
+#endif
                 [cmd() presentDrawable:drawable];
         }
         g9_flush_frame(0);
