@@ -47,11 +47,14 @@ static void wake_slot(uint32_t ws)
     __atomic_fetch_add(&g_wait[ws].gen, 1, __ATOMIC_SEQ_CST);
     if (__atomic_load_n(&g_wait[ws].sleepers, __ATOMIC_SEQ_CST))
         plat_wake_all32(&g_wait[ws].gen);
+    /* The epoch advances on every signal; only the wake is skipped when nobody sleeps on it. A waiter
+     * reads the epoch, unlocks, spins, then counts itself a sleeper: advancing only when sleepers
+     * were counted lost a signal that landed in that gap, and the waiter slept on an epoch that never
+     * moved again with its object signalled (DQX on a Pixel 6a stuck at "Logging in...", about one
+     * start in three, a semaphore at count 1 with its waiter asleep). */
+    __atomic_fetch_add(&g_epoch, 1, __ATOMIC_SEQ_CST);
     if (__atomic_load_n(&g_epoch_sleepers, __ATOMIC_SEQ_CST))
-    {
-        __atomic_fetch_add(&g_epoch, 1, __ATOMIC_SEQ_CST);
         plat_wake_all32(&g_epoch);
-    }
 }
 
 static void lock(void)
