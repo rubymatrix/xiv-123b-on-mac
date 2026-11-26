@@ -47,6 +47,7 @@ an appended line counts from when it is read (so `+0` means now).
 | `move X Y` | cursor to X,Y as fractions (0..1) of the window |
 | `click X Y [left\|right\|middle] [hold_ms]` | move there and click |
 | `shot NAME` | back buffer to `<dir>/NAME.ppm` (`XIV_INPUT_SHOTS`, else the script's folder); `sips -s format png NAME.ppm --out NAME.png` |
+| `text WORDS` | type the rest of the line as characters (SDL text input, so `WM_CHAR`): chat lines, `/check`. Open the chat line first (`key Space`) |
 | `log TEXT` | `[input] <ms>: TEXT` in the client log (sync point for shell loops) |
 | `quit` | exit the client |
 

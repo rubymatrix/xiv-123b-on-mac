@@ -35,6 +35,7 @@ enum
     A_SHOT,   /* text = path */
     A_LOG,    /* text */
     A_QUIT,
+    A_TEXT,   /* text: typed into whatever has focus (SDL text input, so WM_CHAR) */
     A_WALKTO, /* x y = target X Z, a = tolerance cm, b = timeout ms, text "via": no slowing down */
     A_FACE,   /* x y = point X Z */
     A_TURN,   /* x = degrees */
@@ -363,6 +364,13 @@ static void parse_line(char* line, int appended)
     }
     else if (!strcasecmp(cmd, "quit"))
         add(t, A_QUIT);
+    /* text WORDS: the rest of the line as typed characters (chat lines, "/check") */
+    else if (!strcasecmp(cmd, "text") && n >= 3)
+    {
+        Act* a = add(t, A_TEXT);
+        for (int i = 2; i < n; ++i)
+            snprintf(a->text + strlen(a->text), sizeof a->text - strlen(a->text), "%s%s", i > 2 ? " " : "", tok[i]);
+    }
     else
         rt_log("[input] line %d: unknown command '%s'\n", g_line, cmd);
 }
@@ -418,6 +426,22 @@ static void push_key(uint32_t win, int sc, int down)
     e.key.key = SDL_GetKeyFromScancode((SDL_Scancode)sc, SDL_KMOD_NONE, false);
     e.key.mod = held;
     e.key.down = down != 0;
+    SDL_PushEvent(&e);
+}
+
+/* SDL keeps the pointer of a pushed text event, so the text lives in a small ring. */
+static void push_text(uint32_t win, const char* text)
+{
+    static char ring[8][256];
+    static int next;
+    char* buf = ring[next++ & 7];
+    snprintf(buf, sizeof ring[0], "%s", text);
+    SDL_Event e;
+    memset(&e, 0, sizeof e);
+    e.type = SDL_EVENT_TEXT_INPUT;
+    e.text.timestamp = SDL_GetTicksNS();
+    e.text.windowID = win;
+    e.text.text = buf;
     SDL_PushEvent(&e);
 }
 
@@ -1464,6 +1488,7 @@ const char* autoinput_frame(void)
             shot = g_shot_pending;
             break;
         case A_LOG: break;
+        case A_TEXT: push_text(win, a->text); break;
         case A_QUIT:
             rt_log("[input] %llu ms: quit\n", (unsigned long long)now);
             fflush(NULL);
@@ -1473,6 +1498,8 @@ const char* autoinput_frame(void)
             ;
         else if (a->kind == A_LOG)
             rt_log("[input] %llu ms: %s\n", (unsigned long long)now, a->text);
+        else if (a->kind == A_TEXT)
+            rt_log("[input] %llu ms: text %s\n", (unsigned long long)now, a->text);
         else if (a->kind != A_MOVE && a->kind != A_SHOT)
             rt_log("[input] %llu ms: %s %d %d %.2f %.2f\n", (unsigned long long)now,
                 (const char*[]){ "key", "pad", "stick", "trigger", "move", "button", "shot", "log", "quit" }[a->kind], a->a,
